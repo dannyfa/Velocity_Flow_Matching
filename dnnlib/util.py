@@ -15,10 +15,6 @@ import shutil
 import sys
 import types
 import io
-import json
-import open3d as o3d
-import alphashape
-from shapely.geometry import Point
 import pickle
 import re
 import requests
@@ -32,283 +28,574 @@ import uuid
 import torch 
 from torch.utils.data.dataset import Dataset
 from sklearn.decomposition import PCA
-from sklearn import datasets as sklrn_dsets
-from scipy.stats import multivariate_normal
+from abc import ABC,abstractmethod
+from scipy.ndimage import gaussian_filter
 
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
 
 
 #------------------------------------------------------------------------------------------#
-# Utils for IFs 
+# Utils for VFM
 #------------------------------------------------------------------------------------------#
 
 #------------------------------------------------------------------------------------------
-#Toy data utils 
+#Dynamic Toy dataset utils 
 
-def _orthogonalize_cols(mat):
-    """
-    Applies the Gram-Schimdt process to orthogonalize
-    cols of given matrix 
-    """
-    #assign first col to u1
-    u1 = mat[:, 0] 
-    #set up list with our new orthog vectors
-    us = [u1]
-    for c in range(1, mat.shape[1]):
-        curr_u = mat[:, c]
-        for i in range(len(us)):
-            curr_u -= (np.dot(curr_u, us[i])/np.dot(us[i], us[i]))*us[i]
-        us.append(curr_u)
-    return np.array(us).T
+class ToyData(ABC):
 
-def get_orthonormal_rp_matrix(n,d, seed=42):
     """
-    Constructs an orthonormal random projection 
-    matrix.
-    Args:
-        n:int: Number of rows.
-        d:int. Number of cols.
-        seed: random seed to use when constructing rp 
-        matrix.
+    generic base class for toy datasets. implements
+    generate, which all classes need, and defines methods needed
+    by all inheriting classes
     """
-    np.random.seed(seed=seed)
-    rp_mat = np.random.randn(n,d)
-    rp_mat_o = _orthogonalize_cols(rp_mat)
-    rp_mat_on = rp_mat_o / np.linalg.norm(rp_mat_o, ord=2, axis=0)[None, :]
-    return rp_mat_on
 
-def _make_sine_data(dset_option, n):
-    """
-    
-    Construct 2D sine dataset for 
-    toy experiments. 
-    
-    Can construct either 
-    1) sine 1 data (0 to 1, unscaled), or
-    2) sine2 data (-1 to 1), scaled. We use
-    sine2 in paper experiments.
-    
-    Args:
-    -----
-    dset_option: str indicating which
-    sine data (1 or 2) to use.
-    n: number of dset samples we wish 
-    to create. 
-    
-    Returns list containing array of data pts [n, 2]
-    and array of labels [n, np zeros]. 
-    
-    """
-    if dset_option =='1':
-        xs = np.random.uniform(low=0., high=1., size=n)
-        ys = np.sin(4*np.pi*xs) 
-        noise = np.random.normal(loc=0, scale=0.8, size=n) 
-        ys_noise = ys + noise
-        dset = np.array([xs, ys_noise]).T 
-    else: 
-        xs = np.random.uniform(low=-1., high=1., size=n)
-        ys = np.sin(4*np.pi*xs)/4
-        noise = np.random.normal(loc=0, scale=0.15, size=n) 
-        ys_noise = ys + noise
-        dset = np.array([xs, ys_noise]).T   
-    return dset 
 
-def get_toy_dset(dset_name, n=20000, augment_to=0):
-    """
-    
-    Fetches toy dset and labels for a couple 
-    of 2D and 3D toy cases, namely: 
-        1) sine; 
-        2) circles; 
-        3) moons; 
-        4) swirl;
-        5) alt_swirl;
-        5) s_curve;
-        6) alt_s_curve.
-    
-    Alt_swirl and alt_scurve refer to datasets with 
-    y dimension scaled to 0.5, instead of 1.
-    
-    Args:
-    -----
-    dset_name: str. Name of dset we wish to 
-    generate. Can be any of the options listed above.
-    
-    n: int. Number of samples to generate for each dset. 
-    
-    augment_to: int. If not equal to 0, corresponds to dimension
-    we will augmented original toy dset to using an 
-    orthonormal random projection matrix.
-    
-    """
-    if dset_name[:-1] == 'sine':
-        dset_pts = _make_sine_data(dset_name[-1], n)
-        dset_pts = (dset_pts - np.mean(dset_pts, axis=0))/np.std(dset_pts, axis=0)
-        dset_labels = np.zeros(dset_pts.shape[0])
-        dset = [dset_pts, dset_labels]
-    elif dset_name == 'circles':
-        dset = sklrn_dsets.make_circles(n_samples=n, factor=0.5, noise=0.08)
-        circles_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        dset = [circles_zscld, dset[1]]
-    elif dset_name =='moons':
-        dset = sklrn_dsets.make_moons(n_samples=n, noise=0.08)
-        moons_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        dset=[moons_zscld, dset[1]]
-    elif dset_name == 'swirl':
-        dset = sklrn_dsets.make_swiss_roll(n_samples=n, noise=1.25)
-        swiss_roll_pts_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        dset = [swiss_roll_pts_zscld, dset[1]]
-    elif dset_name == 'alt_swirl':
-        dset = sklrn_dsets.make_swiss_roll(n_samples=n, noise=1.25)
-        swiss_roll_pts_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        ys = np.random.randn(dset[0].shape[0]) * 0.5
-        alt_swirl = np.concatenate([np.expand_dims(dset[0][:, 0], axis=-1), np.expand_dims(ys, axis=-1),\
-                           np.expand_dims(dset[0][:, 2], axis=-1)], axis=1)
-        dset = [alt_swirl, dset[1]]
-    elif dset_name == 's_curve':
-        dset = sklrn_dsets.make_s_curve(n_samples=n, noise=0.2)
-        scurve_pts_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        dset = [scurve_pts_zscld, dset[1]]
-    elif dset_name == 'alt_s_curve':
-        dset = sklrn_dsets.make_s_curve(n_samples=n, noise=0.2)
-        scurve_pts_zscld = (dset[0] - np.mean(dset[0], axis=0))/np.std(dset[0], axis=0)
-        ys = np.random.randn(dset[0].shape[0]) * 0.5
-        alt_scurve = np.concatenate([np.expand_dims(dset[0][:, 0], axis=-1), np.expand_dims(ys, axis=-1),\
-                           np.expand_dims(dset[0][:, 2], axis=-1)], axis=1) 
-        dset = [alt_scurve, dset[1]]        
-    else:
-        raise NotImplementedError('Dset name chosen is not implemented!')
-    if augment_to != 0: 
-        #using random proj matrix to augment our original data 
-        rp_matrix = get_orthonormal_rp_matrix(augment_to, dset[0].shape[1])
-        aug_dset = np.squeeze(np.einsum('ij, bjk -> bik', rp_matrix, \
-                                        np.expand_dims(dset[0], axis=-1)))
-        dset = [aug_dset, dset[1]]
-    return dset 
+    def __init__(self):
 
-class ToyDset(Dataset):
-    """
-    Basic daset class for toy data.
-    """
-    def __init__(self, data, labels, transform=None):
-        self.data = data
-        self.labels = labels
-        self.transform=transform
+        pass
+
+    @abstractmethod
+    def f(self,x,t):
+        raise NotImplementedError
+
+    @abstractmethod
+    def g(self,x,t):
+        raise NotImplementedError
+
+    @abstractmethod
+    def dW(self,dt):
+        raise NotImplementedError 
+
+    @abstractmethod
+    def init_conditions(self):
+        raise NotImplementedError
+
+    def dx(self,x,t,dt,sigma):
+
+        fx = self.f(x,t)
+        gx = self.g(x,t,sigma)
+        dw = self.dW(dt)
+
+        return fx * dt + gx @ dw
+    
+    def generate(self,n,T,dt,sigma):
+
+        trajectories = []
+        t = np.arange(dt,T+dt/2,dt)
+        for ii in range(n):
+
+            xnot = self.init_conditions()
+            x = [xnot]
+
+            for jj in range(1,len(t)):
+
+                xx = x[jj-1]
+                tt = t[jj-1]
+
+                dx = self.dx(xx,tt,dt,sigma)
+                
+                x.append(xx + dx)
+            
+            x = np.vstack(x)
+            trajectories.append(x)
+
+        return trajectories
+
+#vanderpol oscillator 
+class Vanderpol(ToyData):
+
+    def __init__(self,coeffs=[2,15],seed=1234):
+
+        super(Vanderpol,self).__init__()
+        self.rho,self.tau = coeffs
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        dx1 = self.rho * self.tau * (x[0] - x[0]**3/3 - x[1])
+        dx2 = self.tau/self.rho * x[0]
+        return np.hstack([dx1,dx2])
+    def g(self,x,t,sigma):
+        return sigma*np.eye(2)
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=dt*np.eye(2))
+
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=[1,1],cov=np.eye(2)*0.03)
+
+#double circles data 
+class DoubleCircles(ToyData):
+
+    def __init__(self,coeffs=[3.5,4,2*np.pi],seed=1234):
+
+        super(DoubleCircles,self).__init__()
+
+        self.r0,self.a,self.omega = coeffs
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        print("f unused in double circles")
+        pass
+
+    def ft(self,theta,r,t):
+        #dtheta = omega
+        if r > self.r0:
+            return self.omega
+        else:
+            return -self.omega
+    
+    def fr(self,r,t):
         
+        # potential function: (r - r0)^4 - a(r - r0)^2
+        return -(4 * (r - self.r0)**3 - 2*self.a * (r - self.r0))
+
+    def g(self,x,t,sigma):
+        return sigma*np.eye(2)
+
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov = dt*np.eye(2))
+    
+    def _polar_to_cartesian(self,r,theta):
+    
+        return np.hstack([r*np.cos(theta),r*np.sin(theta)])
+    
+    def _cartesian_to_polar(self,xy):
         
+        r = np.linalg.norm(xy)
+        theta = np.arctan2(xy[1],xy[0])
+        return r,theta
+    
+    def init_conditions(self):
+        r0 = self.r0 + self.gen.normal(loc=0,scale=0.1)
+        t0 = self.gen.uniform(0,2*np.pi)
+
+        return self._polar_to_cartesian(r0,t0)
+
+    def dx(self,x,t,dt,sigma):
+        
+        r,theta = self._cartesian_to_polar(x)
+        dr = self.fr(r,t)
+        dtheta = self.ft(theta,r,t)
+        r += dr*dt 
+        theta += dtheta*dt
+
+        newX = self._polar_to_cartesian(r,theta)
+        dw_xy = self.g(x,t,sigma) @ self.dW(dt)
+        xy2 = newX + dw_xy
+        
+        return xy2 - x
+
+#Lorenz attractor - 3D ODE sys 
+class Lorenz63(ToyData):
+
+    def __init__(self,coeffs=[10,28,8/3],seed=1234):
+
+        super(Lorenz63,self).__init__()
+        self.sigma,self.rho,self.beta = coeffs
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        
+        dx = self.sigma * (x[1] - x[0]) #+ sample_dW[0]
+        dy = (x[0] * (self.rho - x[2]) - x[1]) #+ sample_dW[1]
+        dz = (x[0]*x[1]  - self.beta*x[2]) #+ sample_dW[2]
+        return np.hstack([dx,dy,dz])
+    
+    def g(self,x,t,sigma):
+        return sigma*np.eye(3)
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((3,)),cov=dt*np.eye(3))
+    
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=np.zeros((3,)),cov=np.eye(3))
+
+#Alternative Lorenz attractor 
+class Lorenz96(ToyData):
+
+    def __init__(self,coeffs=[8],d=10,seed=1234):
+
+        super(Lorenz96,self).__init__()
+        self.F = coeffs
+        self.d = d
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        dx = np.zeros(self.d)
+        # Loops over indices (with operations and Python underflow indexing handling edge cases)
+        for i in range(self.d):
+            dx[i] = (x[(i + 1) % self.d] - x[i - 2]) * x[i - 1] - x[i] + self.F
+        return dx
+    
+    def g(self,x,t,sigma):
+        return np.eye(self.d)*sigma
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((self.d,)),cov=np.eye(self.d)*dt)
+    
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=np.zeros((self.d,)),cov=np.eye(self.d))
+
+#Rossler attractor 
+class Rossler(ToyData):
+
+    def __init__(self,coeffs=[0.1,0.1,14],seed=1234):
+
+        super(Rossler,self).__init__()
+        self.a,self.b,self.c = coeffs
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        dx = -x[1] - x[2] #+ sample_dW[0]
+        dy = x[0] + self.a*x[1] #+ sample_dW[1]
+        dz = self.b + x[2]*(x[0] - self.c) #+ sample_dW[2]
+        return np.hstack([dx,dy,dz])
+    
+    def g(self,x,t,sigma):
+        return np.eye(3)*sigma
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((3,)),cov=np.eye(3)*dt)
+    
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=[0,-9,0],cov=6*np.eye(3))
+
+#Double SDE 
+class DoubleSDE(ToyData):
+
+    def __init__(self,coeffs=[np.pi,-np.pi,np.array([-0.5,0]),np.array([0.5,0])],seed=1234):
+
+        super(DoubleSDE,self).__init__()
+        self.omega1,self.omega2,self.center1,self.center2 = coeffs
+        #self.center2 = -self.center1
+        
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        print("f unused in diverging sdes")
+        pass
+    def ft(self,theta,x,t):
+        if x[0] < 0:
+            return self.omega1
+        else:
+            return self.omega2
+        
+    def g(self,x,t,sigma):
+        return sigma * np.eye(2)#/(np.abs(x[0])+1/10)
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=np.eye(2)*dt)
+    
+    def _polar_to_cartesian(self,r,theta):
+    
+        return np.hstack([r*np.cos(theta),r*np.sin(theta)])
+    
+    def _cartesian_to_polar(self,xy):
+    
+        r = np.linalg.norm(xy)
+        theta = np.arctan2(xy[1],xy[0])
+        return r,theta
+    
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=[0,-0.5],cov=np.eye(2)*0.01)
+
+    def dx(self,x,t,dt,sigma):
+
+        if x[0] < 0:
+            v = x - self.center1
+            r,theta = self._cartesian_to_polar(v)
+            dtheta = self.ft(theta,x,t)
+            theta += dtheta*dt
+            xx2 = self._polar_to_cartesian(r,theta) + self.center1
+        else:
+            v = x - self.center2
+            r,theta = self._cartesian_to_polar(v)
+            dtheta = self.ft(theta,x,t)
+            theta += dtheta*dt
+            xx2 = self._polar_to_cartesian(r,theta) + self.center2
+
+        return xx2 + self.g(x,t,sigma)@self.dW(dt) - x
+
+#Moving balls dataset (movie)
+class Balls(ToyData):
+
+    def __init__(self,coeffs=np.array([[-1,-3],[-3,1]]),seed=1234):
+
+        super(Balls,self).__init__()
+        self.coeffs = np.array(coeffs)
+
+        #self.center2 = -self.center1
+        
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+
+        return self.coeffs @ x 
+
+    def g(self,x,t,sigma):
+
+        return sigma*np.eye(2)
+
+    def dW(self,dt):
+
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=dt*np.eye(2))
+    
+    def init_conditions(self):
+
+        return self.gen.multivariate_normal(mean=[-1,0],cov=np.eye(2)*0.25**2)
+    
+    def traj_to_movie(self,trajectories,image_shape,radius,blur=False):
+        """
+        converts a latent trajectory to a movie
+        """
+
+
+        movies = []
+        gX,gY = np.meshgrid(np.linspace(-1,1,2*radius),np.linspace(-1,1,2*radius))
+        ball = (gX**2 + gY**2 < 1)
+        image_shape = np.array(image_shape)
+        
+        for traj in trajectories:
+            traj -= np.amin(traj)
+            traj /= np.amax(np.abs(traj))
+
+            frames = np.zeros((len(traj),1,image_shape[0],image_shape[1]))
+        
+            for point in range(len(traj)):
+        
+                ballCenter = (traj[point,:] *(image_shape - 2*radius)).astype(int) + radius
+                frames[point,0,ballCenter[0]-radius:ballCenter[0] + radius, ballCenter[1]-radius:ballCenter[1] + radius] += ball
+                if blur:
+                    frames[point,0,:,:] = gaussian_filter(frames[point,0,:,:],sigma=radius*4,truncate=0.05)
+
+            movies.append(frames)
+
+        return movies
+
+
+class ToyDsetDynamics(Dataset):
+
+    """
+    dataloader for toy datasets with dynamics. expects data in the form of that created by
+    my toy data creation methods -- in other words, a list of np.arrays.
+    flattens all arrays and creates a set of valid indices of that array to sample from.
+    This set of valid indices is also based on nForward: the number of steps forward in time
+    that we want our model to predict. 
+    When sampling, will return samples of length nForward + 2 (last index is dt)
+    """
+
+    def __init__(self,data,dt,nForward=1) -> None:
+        
+
+        self.maxForward = nForward
+        exampleInd = np.random.choice(len(data),1)[0] #choose a traj at random 
+        self.exampleTraj = data[exampleInd] #get traj we sampled
+        lens = list(map(len,data)) #list with lengths of trajs (should be all equal for toys) 
+        lens2 = [0] + list(np.cumsum([l for l in lens][:-1])) #cumsum over total number of pts across trajs 
+        #sets ranging from 0  to traj length -- constructs one per traj 
+        sets = [np.vstack([np.arange(ii, l+ ii - self.maxForward) for ii in range(self.maxForward + 1)]).T for l in lens]
+        sumSets = [p+l for p,l in zip(sets,lens2)] #shifts sets appropriately 
+        validInds = np.vstack(sumSets) #stacks all sets
+        self.data= np.vstack(data) #stacks all trajs, 
+        self.data_inds = validInds 
+        self.dt = dt
+        self.length = len(validInds)
+
     def __len__(self):
-        return self.data.shape[0]
-    
-    def __getitem__(self, idx):
-        pt_coords = self.data[idx, :]
-        pt_label = self.labels[idx]
-        if self.transform:
-            pt_coords = self.transform(pt_coords)
-        return pt_coords, pt_label
-    
 
-#---------------------------------------------------------------------
-#Methods to get x1,x0 independent samples for CFM training 
+        return self.length 
+    
+    def __getitem__(self, index):
+        
+        single_index = False
+        result = []
+        try:
+            iterator = iter(index)
+        except TypeError:
+            index = [index]
+            single_index = True
 
-#toys 
-def get_cfm_samples(dset_kwargs, n, device, W, flow_matcher_type):
+        for ii in index:
+            inds = self.data_inds[ii]
+
+            samples = [self.transform(self.data[ind]) for ind in inds]
+            samples.append(self.dt)			
+            result.append(samples)
+
+        if single_index:
+            return result[0]
+        return result
+    
+    def transform(self,data):
+        return torch.from_numpy(data).type(torch.FloatTensor)
+
+#projection helper 
+class projection():
+
     """
-    Samples x1, x0 appropriately for training with different CFM
-    schemes.
-    Should be called from inside toy_training_loop_cfm script.
-    """ 
-    x1 = get_toy_dset(dset_kwargs.dset_name, n, augment_to=dset_kwargs.augment_to)[0] #sample 2/3D data or aug data 
-    x1 = torch.from_numpy(x1).type(torch.float32).to(device)
-    if flow_matcher_type=='ifs':
-       #pass x1 to ES 
-       x1 = torch.einsum('ij, bjk -> bik', W.T, x1.unsqueeze(-1)).squeeze(-1)
-       #make x0 == None
-       x0 = None
-    else: 
-        #exact OT case 
-        x0 = torch.randn(x1.shape).type(torch.float32).to(device)
-        if dset_kwargs.working_data_dim != dset_kwargs.dims_to_keep: 
-            scale = torch.cat([torch.ones(dset_kwargs.dims_to_keep), \
+    projects things to a higher dimensional space, plus some additional nonlinearity. 
+    should save out everything 
+
+    """
+
+    def __init__(self,origDim,newDim, projType='linear',temp=1,seed=1234) -> None:
+        self.gen = np.random.default_rng(seed=seed)
+        self.d1 = origDim
+        self.d2 = newDim
+        self.projType=projType 
+        self.W = self.gen.normal(loc=0.0,scale=1.5,size=(origDim,newDim))
+        self.temp=temp
+        if projType == 'linear':
+            
+
+            self.projection = lambda x: x @ self.W 
+        
+        elif projType == 'softmax':
+
+            assert self.temp >0, print('Temperature should be a positive number')
+            self.projection = lambda x: _softmax(x @ self.W,temp=self.temp)
+
+        elif projType == 'combine':
+
+            self.projection = lambda x: _combine_dims(x @ self.W)
+
+        elif projType == 'sigmoid':
+
+            assert self.temp >0, print('Temperature should be a positive number')
+            self.projection = lambda x: _sigmoid(x @ self.W,temp=self.temp)
+
+        elif projType == 'swish':
+
+            assert self.temp >0, print("Temperature should be a positive number")
+            self.projection = lambda x: _swish(x @ self.W,temp=self.temp)
+        elif projType == 'double swish':
+
+            assert self.temp >0, print("Temperature should be a positive number")
+            self.projection = lambda x: _double_swish(x @ self.W,temp=self.temp)
+
+
+        else:
+            print('Method must be softmax,combine,sigmoid,swish,double swish,or linear')
+            raise NotImplementedError
+
+    
+    def project(
+        self,
+        data: np.array,
+        noise: float= 0.
+     ) -> np.array:
+        
+        r"""
+        Return batch projectiojns.
+        
+
+        Args: 
+            data: what we are embedding in a higher-d space
+            
+        """
+        if noise:
+            proj = self.projection(data)
+            return  proj + noise * np.random.normal(size=proj.shape)
+        else:
+            return self.projection(data)
+          
+def _swish(x:np.array,temp=1):
+
+    xout = x * _sigmoid(x,temp)
+
+    return xout
+
+def _double_swish(x:np.array,temp=1):
+
+    xout = np.sign(x) * _swish(np.abs(x),temp=temp)
+
+    return xout
+
+def _softmax(x:np.array,temp=1):
+
+    m = np.amax (x,axis=1,keepdims=True)
+    e_x = np.exp((x - m)/temp)
+    return e_x/np.sum(e_x,axis=1,keepdims=True) 
+
+def _combine_dims(x:np.array):
+
+    xOut = x 
+    for ii in range(x.shape[-1]-1):
+        xOut[:,ii] = x[:,ii]*x[:,ii+1]
+
+    return xOut
+
+def _sigmoid(x:np.array,temp=1):
+
+    xout = 1/(1 + np.exp(-x*temp))
+
+    return xout
+
+
+#wrapper to get toy dynamics dset by name 
+def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_specs=None):
+    """
+    Wrapper to construct desired toy dynamic dset from name, params.
+    Can handle projections too if desired.
+    """
+    DATASETS = {'vanderpol': "Vanderpol()", 
+            'doublecircles': "DoubleCircles()", 
+            'rossler': "Rossler()", 
+            'lorenz63': "Lorenz63()",
+            'lorenz96': "Lorenz96()", 
+            'doublesde': "DoubleSDE()"}
+    dset_name = dset_name.lower()
+    try: 
+        dset_gen_obj = eval(DATASETS[dset_name])
+    except KeyError:
+        raise ValueError(f"Unknown Dataset: {dset_name}")
+    #sample deserired trajs from it 
+    dset_samples = dset_gen_obj.generate(n=n_trajs, T=T, dt=dt, sigma=sigma)
+    #project data if desired 
+    if project: 
+        assert proj_specs != None, 'To project need projection specs!'
+        orig_dim = dset_samples[0][0].shape[0]
+        projection_obj = projection(orig_dim, proj_specs.project_to, \
+                                    projType=proj_specs.proj_type, \
+                                    temp=proj_specs.temp)
+        proj_dset_samples = [[projection_obj.project(t) for t in traj] for traj in dset_samples]
+        dset_samples = proj_dset_samples
+    
+    dset_obj = ToyDsetDynamics(dset_samples, dt, nForward=1)
+    return dset_obj, dset_samples
+
+#methods to sample (independently) xt,0's
+
+def get_xt_zero_samples(dset_kwargs, n, device, W, concatenated=False):
+    """
+    Sample xt,0's from either full or low-rank MVN 
+    and pass these samples to original IS/data space.
+
+    Can either generate xt,0's for a single pt or for two points (independently)
+    if concatenated ==True.
+    """
+    working_n = 2*n if concatenated else n
+    x0 = torch.randn(working_n, dset_kwargs.working_data_dim).type(torch.float32).to(device)      
+    if dset_kwargs.working_data_dim != dset_kwargs.dims_to_keep:
+        scale =  torch.concatenate([torch.ones(dset_kwargs.dims_to_keep), \
                                                   torch.ones(dset_kwargs.working_data_dim - dset_kwargs.dims_to_keep)*dset_kwargs.eps], \
                                       dim=0).type(torch.float32).to(device)
-            x0 *= torch.sqrt(scale)
-    return x1, x0
- 
-#hd cases
-def get_hd_cfm_samples(dataset_iterator, device, W, pfODEsim_kwargs):
-    """
-    Similar to above method, BUT for HD image data.
-    Note that for HD scripts, dset_kwargs is used only 
-    to construct dset obj.
-    I use a different dict (pfODEsim_kwargs) to run pfODE sim and 
-    training sampling.
-    """ 
-    x1, labels = next(dataset_iterator) #bs, C, H, W | bs, 0
-    x1 = ((x1 - pfODEsim_kwargs.mean)/pfODEsim_kwargs.scale).to(device) #center, scale to [0,1]
-    labels = labels.to(device)
-    x0 = torch.randn(x1.shape[0], pfODEsim_kwargs.working_data_dim).type(torch.float32).to(device) #bs, dim 
-    if pfODEsim_kwargs.working_data_dim != pfODEsim_kwargs.dims_to_keep: 
-        scale = torch.cat([torch.ones(pfODEsim_kwargs.dims_to_keep), \
-                                   torch.ones(pfODEsim_kwargs.working_data_dim - pfODEsim_kwargs.dims_to_keep)*pfODEsim_kwargs.eps], \
-                                  dim=0).type(torch.float32).to(device) 
-        x0 *= torch.sqrt(scale) 
-    x0 = torch.einsum('ij, bjk -> bik', W, x0.unsqueeze(-1)).squeeze(-1) #pass to IS! 
-    x0 = x0.reshape(x1.shape) #bs, C, H, W 
-    return x1, x0, labels
-    
-    
-#------------------------------------------------------------------
-#IFs ODE integration/schedule utils 
-
-
-def get_disc_times(disc='ifs', end_time=15.01, n_iters=1501, int_mode='melt', eps=1e-2):
-    """
-    Gets times for 2 different disc options implemented namely original "ifs" disc
-    (linearly spaced pts) vs. VP ODE disc (see EDM paper table 1). 
-    Main paper uses vp_ode discretization for all image experiments
-    and 'ifs' discretization for all toy experiments.
-    """
-    if disc=='ifs':
-        times = np.linspace(0, end_time, n_iters)
-        if int_mode == 'gen':
-            times = np.flip(times)
-    elif disc=='vp_ode':
-        times = [end_time + (i/(n_iters-1))*(eps-end_time) for i in range(0, n_iters)]
-        if int_mode=='melt':
-            times = np.flip(times)
+        x0 *= torch.sqrt(scale)[None, :]
+    x0 = torch.einsum('ij, bjk -> bik', W, x0.unsqueeze(-1)).squeeze(-1) #pass x0 to IS as well
+    if concatenated: 
+        return x0.reshape(n, -1) #n, 2d 
     else: 
-        raise NotImplementedError("Discretization options not implemented!")
-    return times
+        return x0
 
 
-def get_g(data_dim, dims_to_keep, device):
-    """
-    
-    Computes g tensor to be used 
-    when constructing gamma(t) and
-    inflation kernel covariances.
-    
-    Args:
-    ----
-    data_dims: int. Original dimensionality
-    of data.
-    dims_to_keep:int. Number of dimensions 
-    we wish to preserve as flow progresses.
-    device: instance of torch.device class. 
-    
-    """
-    if data_dim == dims_to_keep:
-        #this is PRP case
-        g = torch.zeros(data_dim).to(device)
-    else: 
-        #this is PRR case 
-        g_pos = np.ones(dims_to_keep)
-        g_neg = -(dims_to_keep/(data_dim - dims_to_keep))*np.ones((data_dim-dims_to_keep))
-        g = np.append(g_pos, g_neg)
-        g = torch.from_numpy(g).type(torch.float32).to(device)
-    return g
-
+#helper to calc PCA decomp. 
+#This will be replaced by streaming SVD 
 
 def get_eigenvals_basis(X, n_comp=784):
     """
@@ -321,387 +608,6 @@ def get_eigenvals_basis(X, n_comp=784):
     eigenvals = pca.explained_variance_
     U = pca.components_ #eigenvectors are rows of U 
     return eigenvals, pca, U.T #eigenvectors returned as cols of U
-
-def get_gamma(g, ts, gamma0=5e-4, rho=1):
-    """
-    Method to compute gamma(t) during ODE simulation.
-    
-    Args:
-    -----
-    g: torch.Tensor [dim]. Constant g tensor used for IFs 
-    schedule.
-    ts: float. Time pt we should compute gammas for.
-    gamma0: float. Initial noise kernel width (assuming t0=0)
-    rho: float. Constant for exponential growth of noise kernel.
-    
-    Returns: 
-    ------
-    gamma: torch.Tensor [dim]. Tensor containing values for 
-    noise covariance diagonal at given ts time pt.
-    """
-    exp_term = (torch.ones(g.shape[0]).to(g.device) + g) * ts #D
-    gamma = gamma0 * torch.exp(rho*exp_term) #D
-    return gamma
-
-def get_gamma_dot(g, ts, gamma0=5e-4, rho=1):
-    """
-    Method to compute derivative of gamma(t) 
-    during ODE simulation.
-    
-    Args:
-    -----
-    g: torch.Tensor [dim]. Constant g tensor used for IFs 
-    schedule.
-    ts: float. Time pt we should compute gammas for.
-    gamma0: float. Initial noise kernel width (assuming t0=0)
-    rho: float. Constant for exponential growth of noise kernel.
-    
-    Returns: 
-    ------
-    gamma_dot: torch.Tensor [dim]. Tensor containing values for 
-    noise covariance diagonal at given ts time pt.
-    """
-
-    mult_term = rho*(torch.ones(g.shape[0]).to(g.device) + g) #D
-    gamma_dot = mult_term * get_gamma(g, ts, gamma0=gamma0, rho=rho)#D
-    return gamma_dot
-
-def get_s(xi_star, g, t, A0=1, gamma0=5e-4, rho=1):
-    """
-    Method to compute s(t) (i.e., \alpha(t)) scaling 
-    during ODE simulation.
-    
-    Args:
-    -----
-    xi_star: float. Value for highest eigevalue of original 
-    data.
-    g: torch.Tensor [dim]. Constant g tensor used for IFs 
-    schedules.
-    t: float. Time pt we should compute s(t) for.
-    A0: float. Variance we should achieve (per dimension)
-    at end of melt.
-    gamma0: float. Initial noise kernel width (assuming t0=0)
-    rho: float. Constant for exponential growth of noise kernel.
-    
-    Returns: 
-    ------
-    s(t): float. Scaling factor to be used in ODE simulation.
-    """
-    g_star = torch.amax(g).cpu().numpy()
-    gamma_gstar = gamma0 * np.exp(rho*(1+g_star)*t)
-    den = np.sqrt(xi_star + gamma_gstar)
-    s = A0 / den 
-    return s 
-
-def get_s_dot(xi_star, g, t, A0=1, gamma0=5e-4, rho=1):
-    """
-    Method to compute s_dot scaling derivative
-    during ODE simulation.
-    
-    Args:
-    -----
-    xi_star: float. Value for highest eigevalue of original 
-    data.
-    g: torch.Tensor [dim]. Constant g tensor used for IFs 
-    schedules.
-    t: float. Time pt we should compute s(t) for.
-    A0: float. Variance we should achieve (per dimension)
-    at end of melt.
-    gamma0: float. Initial noise kernel width (assuming t0=0)
-    rho: float. Constant for exponential growth of noise kernel.
-    
-    Returns: 
-    ------
-    s_dot: float. Scaling factor to be used in ODE simulation.
-    """
-    g_star = torch.amax(g).cpu().numpy()
-    gamma_gstar = gamma0 * np.exp(rho*(1+g_star)*t)
-    s_dot = -0.5*A0*rho*(1+g_star)*gamma_gstar*((xi_star + gamma_gstar)**(-1.5))
-    return s_dot 
-
-def get_dx_dt_params(time, **kwargs):
-    """
-    Computes ifs schedule noise, scaling components
-    needed to calculate flow dx/dt for a given time pt.
-    """
-    s = get_s(kwargs.get('xi_star'), kwargs.get('g'), time, A0=kwargs.get('A0'), \
-                               gamma0=kwargs.get('gamma0'), rho=kwargs.get('rho'))
-        
-    s_dot=get_s_dot(kwargs.get('xi_star'), kwargs.get('g'), time, A0=kwargs.get('A0'), \
-                               gamma0=kwargs.get('gamma0'), rho=kwargs.get('rho'))
-        
-    gamma = get_gamma(kwargs.get('g'), time, \
-                                       gamma0=kwargs.get('gamma0'), rho=kwargs.get('rho')) #dim
-    gamma_inv = torch.reciprocal(gamma) #dim 
-    gamma_dot = get_gamma_dot(kwargs.get('g'), time, \
-                                       gamma0=kwargs.get('gamma0'), rho=kwargs.get('rho'))    
-    return s, s_dot, gamma_inv, gamma_dot 
-
-def get_gen_samples(data_dims, dims_to_keep, device, shape, eps=1e-10):
-    """
-    
-    Samples from appropriate MVN corresponding to end of melt/inflation
-    in either PRP or PRR schedules. 
-    
-    Args: 
-    ----
-    data_dims: float. Total number of dimensions in original data.
-    dims_to_keep: float. Total number of dimensions we would like to 
-    preserve when inflating.
-    device: torch.device instance.
-    shape: tuple(bs, dim). Tuple containing shape for desired samples 
-    to be generated. 
-    eps: float. Small constant variance for dimensions we will be compressing.
-    
-    Returns: 
-    -----
-    samples: torch.Tensor [bs, dim]. Tensor containing appropriate MVN samples
-    to be fed to code simulating ODE in backward (i.e., generative) direction.
-    
-    """
-    #take samples from std MVN 
-    #this is prp regime 
-    samples = torch.randn(shape, dtype=torch.float32, device=device) #bs, C, H, W 
-    std_tot_dims = torch.ones(data_dims).to(device)
-    
-    if data_dims > dims_to_keep: 
-        #prr regime 
-        var_dims_to_keep = np.ones(dims_to_keep)
-        var_dims_to_compress = np.ones(data_dims - dims_to_keep)*eps 
-        var_tot_dims = np.append(var_dims_to_keep, var_dims_to_compress)
-        std_tot_dims = torch.from_numpy(np.sqrt(var_tot_dims)).type(torch.float32).to(device)
-        samples = std_tot_dims[None, :] * samples.reshape(samples.shape[0], -1) 
-    
-    return samples.reshape(shape), std_tot_dims 
-
-
-def get_mvn_samples(location, cov, size, random_state=42):
-    """
-    Samples from a mvn w/ given location
-    and covariance.
-    ---
-    Args:
-    location: np.array containing mean/loc 
-    of our mvn.
-    cov: np.array containing covariance
-    matrix for our mvn
-    size: int. Number of mvn samples we wish to 
-    produce
-    random_state: random seed for scipy.
-    """
-    samples = multivariate_normal.rvs(mean=location, cov=cov, \
-                                      size=size, random_state=random_state)
-    return samples
-
-#---------------------------------------------------------------------------#
-#Methods for toy CI Exps 
-#---------------------------------------------------------------------------#
-
-#----------------------------------------------------------------------------
-#helpers for 2D alpha-shape and 3D mesh experiments
-
-def dump_json(save_dir, fname, coverages):
-    """
-    Writes .txt file with nested dicts containing
-    results of computed coverages.
-    """
-    with io.open(os.path.join(save_dir, fname), 'w', encoding='utf-8') as f: 
-        f.write(json.dumps(coverages, ensure_ascii=False))
-    return 
-
-def print_coverage_table(coverage_dict):
-    """
-    Prints vals stored in coverage nested dicts.
-    """
-    print("{:<10} {:<10} {:<10} {:<10} {:<10}".format('Radius', 'Total_in',\
-                                                      'Total_Out', 'Percent_In', 'Percent_Out'))
-    for k,v in coverage_dict.items():
-        vals_to_print = [] 
-        for k2, v2 in v.items(): 
-            vals_to_print.append(v2) 
-        vals_to_print = np.round(np.array(vals_to_print), decimals=2)
-        k = np.round(k, decimals=2)
-        print("{:<10} {:<10} {:<10} {:<10} {:<10}".format(k, vals_to_print[0], \
-                                              vals_to_print[1], vals_to_print[2], \
-                                                  vals_to_print[3]))
-    return 
-
-
-def get_all_boundary_pts(bpts_radii, std_tot_dims, d, n, center=None):
-    """
-    Runs through a list of desired boundary/shell radii 
-    and samples n boundary pts for each one of these.
-    Can either take center=None which defaults to zero center
-    or some other custom center.
-    
-    Args
-    -------
-    bpts_radii: list containing radii for boundaries we wish 
-    to sample from. 
-    std_tot_dims: np.array. Contains standard devs (per dimesion)
-    for diagonal Gaussian latent space we wish to sample from. 
-    d: int. Dimension of Gaussian latent space.
-    n: int. Number of boundary pts to sample per boundary sphere/radius.
-    center: np.array. Defaults to None -> np.zeros(d). 
-    
-    Returns
-    -------
-    np.array [len(bpts_radii), n, d]
-    containing all desired boundary pt samples for all 
-    radiii/bounding sphere.
-    """
-    if center is None: 
-        center = np.zeros(d) #default to zero center 
-    
-    #pass any potential tensors to np
-    if torch.is_tensor(std_tot_dims):
-        std_tot_dims = std_tot_dims.cpu().numpy()
-               
-    all_bpts = []
-    for r in bpts_radii:
-        curr_bpts = sample_boundary_pts(center=center, radius=r*std_tot_dims, \
-                                        d=d, n=n)
-        all_bpts.append(curr_bpts)
-    all_bpts = np.concatenate(all_bpts, axis=0)
-    
-    return all_bpts
-
-
-def sample_boundary_pts(center, radius=np.array([1., 1.]), d=2, n=200):
-    """
-    Samples n, d-dimensional boundary pts uniformly from 
-    a sphere of given radius and center coordinates. 
-    """
-    boundary_pts = np.random.randn(n, d)
-    boundary_pts /= np.linalg.norm(boundary_pts, ord=2, axis=-1)[:, None]
-    boundary_pts *= radius[None, :]
-    boundary_pts += center[None, :]
-    return boundary_pts
-
-
-def compute_coverages_2Dalphashape(samples, bpts, bpts_radii, bpts_per_radii, **kwargs):
-    """
-    For each set of bpts defining a bounding sphere, 
-    fit an alpha shape to these, then query whether samples
-    lie inside or outside of this alpha-shape and report counts and percentiles.
-    
-    Args
-    ------
-    samples: np.array [n, d]. Array with test pts we wish to eval coverages for.
-    bpts: np.array[len(bpts_radii), n', d]. Array with all sampled bpts per each 
-          boundary.
-    bpts_radii: list containing radii for boundaries we wish 
-    to sample from. 
-    bpts_per_radii: int. Number of boundary pts sampled per each boundary.
-    
-    
-    Returns: 
-    --------
-    nested dictionary containing total counts and percent coverages for each
-        boudnary/sphere. 
-    Also explicitly prints these results as a table. 
-    """
-    bpts_idxs = np.arange(0, len(bpts_radii)*bpts_per_radii, bpts_per_radii)
-    all_coverages = {}
-    for i in range(bpts_idxs.shape[0]):
-        curr_bpts = bpts[bpts_idxs[i]:(bpts_idxs[i]+bpts_per_radii), :]
-        curr_alphashape = alphashape.alphashape(curr_bpts, 0.005)
-        curr_pts_in = 0
-        curr_pts_out = 0
-        for pt in range(samples.shape[0]):
-            curr_pt = Point(samples[pt, 0], samples[pt, 1])
-            curr_decision = curr_alphashape.contains(curr_pt)
-            if curr_decision==True: 
-                curr_pts_in+=1
-            else:
-                curr_pts_out+=1
-        assert (curr_pts_in+curr_pts_out)==samples.shape[0], 'Total in and out MUST add to total samples!'
-        curr_pin = (curr_pts_in/samples.shape[0])*100
-        curr_pout = (curr_pts_out/samples.shape[0])*100
-        curr_coverages = {'total_in':curr_pts_in, 'total_out':curr_pts_out, 
-                         'percent_in':curr_pin, 'percent_out':curr_pout}
-        all_coverages[float(bpts_radii[int(i)])] = curr_coverages
-    
-    print_coverage_table(all_coverages)
-    return all_coverages
-
-def compute_coverages_3Dmesh(samples, bpts, bpts_radii, bpts_per_radius, **kwargs):
-    """
-    Takes each set of bpts (for a given radius), fits a point-cloud to it, then
-    computes triangular mesh for this point-cloud and uses this mesh to 
-    query whether or not each one of samples given lies 
-    inside or outside of mesh.     
-    
-    Args
-    ------
-    samples: np.array [n, d]. Array with test pts we wish to eval coverages for.
-    bpts: np.array[len(bpts_radii), n', d]. Array with all sampled bpts per each 
-          boundary.
-    bpts_radii: list containing radii for boundaries we wish 
-    to sample from. 
-    bpts_per_radii: int. Number of boundary pts sampled per each boundary.
-    
-    
-    Returns: 
-    --------
-    nested dictionary containing total counts and percent coverages for each
-        boudnary/sphere. 
-    Also explicitly prints these results as a table.     
-    Saves fitted 3D alpha meshes for each radius given to a separate directory. 
-    """
-    #get schedule, space, schedule info 
-    #to construct subdirs for fitted meshes 
-    schedule = kwargs.get('schedule')
-    space=kwargs.get('space')
-    save_dir = kwargs.get('save_dir')
-    
-    #construct our idxs
-    idxs = np.arange(0, len(bpts_radii)*bpts_per_radius, bpts_per_radius)
-    #pass ls_samples to o3d tensor 
-    all_query_pts = o3d.core.Tensor([samples], dtype=o3d.core.Dtype.Float32)
-    #init data coverages dict
-    data_coverages = {}
-    for i in range(idxs.shape[0]):
-        #pass bpts to point cloud 
-        curr_bpts = bpts[idxs[i]:idxs[i]+bpts_per_radius, :]
-        curr_pcd = o3d.geometry.PointCloud()
-        curr_pcd.points = o3d.utility.Vector3dVector(curr_bpts)
-        #construct triangular mesh from point cloud
-        curr_tetra_mesh, curr_pt_map = o3d.geometry.TetraMesh.create_from_point_cloud(curr_pcd)
-        curr_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd=curr_pcd, \
-                                                                     alpha=10, \
-                                                                     tetra_mesh=curr_tetra_mesh, \
-                                                                     pt_map=curr_pt_map)
-        curr_mesh.compute_vertex_normals()
-        #check that mesh is watertight 
-        #this is needed to test occupancy of points!
-        assert curr_mesh.is_watertight()==True, 'Mesh needs to be watertight!'
-        
-        #save mesh info to a .ply file
-        curr_fname = "{}_{}_mesh_{}radius_bpts.ply".format(schedule, space, bpts_radii[int(i)])
-        curr_out_path = os.path.join(save_dir, '{}_{}_meshes'.format(schedule, space), curr_fname)
-        if not os.path.exists(os.path.join(save_dir, '{}_{}_meshes'.format(schedule, space))):
-            os.makedirs(os.path.join(save_dir, '{}_{}_meshes'.format(schedule, space)))
-        o3d.io.write_triangle_mesh(curr_out_path, curr_mesh)
-        
-        #construct a RaycastingScene, add our mesh to it
-        curr_scene = o3d.t.geometry.RaycastingScene()
-        curr_t_mesh = o3d.t.geometry.TriangleMesh.from_legacy(curr_mesh)
-        _ = curr_scene.add_triangles(curr_t_mesh)
-        #compute ocupancy
-        curr_occupancy = curr_scene.compute_occupancy(all_query_pts)
-        #now compute total in, out and percentiles 
-        curr_total_in = np.sum(curr_occupancy.numpy())
-        curr_total_out = samples.shape[0] - curr_total_in
-        curr_percent_in, curr_percent_out = (curr_total_in/samples.shape[0])*100, \
-        (curr_total_out/samples.shape[0])*100
-        curr_res_dict = {'total_in':int(curr_total_in), 'total_out':int(curr_total_out),
-                    'percent_in':float(curr_percent_in), 'percent_out':float(curr_percent_out)} 
-        data_coverages[float(bpts_radii[int(i)])] = curr_res_dict
-    
-    print_coverage_table(data_coverages)
-    return data_coverages
-
 
 
 #------------------------------------------------------------------------------#

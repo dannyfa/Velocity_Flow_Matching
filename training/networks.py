@@ -824,6 +824,10 @@ class DhariwalUNet(torch.nn.Module):
         x = self.out_conv(silu(self.out_norm(x)))
         return x
 
+##########################################
+# Preconditionings from EDM paper
+# This is legacy code and will be removed! 
+
 #----------------------------------------------------------------------------
 # Preconditioning corresponding to the variance preserving (VP) formulation
 # from the paper "Score-Based Generative Modeling through Stochastic
@@ -988,10 +992,10 @@ class iDDPMPrecond(torch.nn.Module):
         result = index if return_index else self.u[index.flatten()].to(sigma.dtype)
         return result.reshape(sigma.shape).to(sigma.device)
 
-#----------------------------------------------------------------------------
-# Improved preconditioning proposed in the paper "Elucidating the Design
-# Space of Diffusion-Based Generative Models" (EDM).
 
+#----------------------------------------------------------------------------
+# Preconditioning corresponding to EDM (proposed) formulation from
+# the paper "Improved Denoising Diffusion Probabilistic Models".
 @persistence.persistent_class
 class EDMPrecond(torch.nn.Module):
     def __init__(self,
@@ -1034,328 +1038,20 @@ class EDMPrecond(torch.nn.Module):
     def round_sigma(self, sigma):
         return torch.as_tensor(sigma)
 
-#------------------------------------------------------------------------
-# EDM Preconditing for toy data in ES and IS
-# These are NOT used in paper experiments
-# But can be used as sanity checks
+##################################################################################
 
-@persistence.persistent_class
-class EDMToyPreCond(torch.nn.Module):
-    def __init__(self,
-        img_res = 8,                   #resolution of imgs to be fed to conv layers.
-        channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
-        fc_embed_dim = 2,              #Dimensionality for Gaussian random feature embeddings for fc layers 
-        conv_embed_dim = 256,          #Dimensionality for Gaussian random feature embeddings for conv layers
-        data_dim=2,                    #dimensionality of dat we will feed through Net 
-        out_ch=1,                      #number of channels in output of final conv layer        
-        sigma_min= 0,                  # Minimum supported noise level.
-        sigma_max= float('inf'),       # Maximum supported noise level.
-        sigma_data = 1.0,              # Expected standard deviation of the training data.
-        model_type = 'ToyConvUNet',    # Class name of the underlying model.
-        device = torch.device('cuda')
-    ):
-        super().__init__()        
-        self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        self.sigma_data = sigma_data
-        self.device=device
-        
-        #setup model 
-        assert model_type in ['ToyConvUNet', 'ToySongUNet']
-        if model_type == 'ToyConvUNet': 
-            self.model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
-                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
-        else: 
-            #am lealving defaults for DDPM++ arch 
-            self.model = globals()[model_type](img_resolution=img_res, data_dim=data_dim, \
-                                               in_channels=out_ch, out_channels=out_ch)   
-    def forward(self, x, sigma):
-        x = x.to(torch.float32)
-        c_skip = self.sigma_data ** 2 / (sigma ** 2 + self.sigma_data ** 2)
-        c_out = sigma * self.sigma_data / (sigma ** 2 + self.sigma_data ** 2).sqrt()
-        c_in = 1 / (self.sigma_data ** 2 + sigma ** 2).sqrt()
-        c_noise = sigma.log() / 4        
-
-        F_x = self.model((c_in[:, None] * x).to(torch.float32), c_noise)
-        assert F_x.dtype == torch.float32
-        D_x = c_skip[:, None] * x + c_out[:, None] * F_x.to(torch.float32)
-        return D_x        
-    
-@persistence.persistent_class
-class EDMToyESPreCond(torch.nn.Module):
-    def __init__(self,
-        img_res = 8,                   #resolution of imgs to be fed to conv layers.
-        channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
-        fc_embed_dim = 2,              #Dimensionality for Gaussian random feature embeddings for fc layers 
-        conv_embed_dim = 256,          #Dimensionality for Gaussian random feature embeddings for conv layers
-        data_dim=2,                    #dimensionality of dat we will feed through Net 
-        out_ch=1,                      #number of channels in output of final conv layer        
-        sigma_min= 0,                  # Minimum supported noise level.
-        sigma_max= float('inf'),       # Maximum supported noise level.
-        data_eigs = None,              # Eigenvals for original data (these are \sigma_{data}^2)
-        model_type = 'ToyConvUNet',    # Class name of the underlying model.
-        device = torch.device('cuda')
-    ):
-        super().__init__()        
-        self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        self.data_eigs = torch.from_numpy(data_eigs).to(torch.float32).to(device)
-        self.device=device
-
-        #setup model 
-        assert model_type in ['ToyConvUNet', 'ToySongUNet']
-        if model_type == 'ToyConvUNet': 
-            self.model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
-                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
-        else: 
-            #am lealving defaults for DDPM++ arch 
-            self.model = globals()[model_type](img_resolution=img_res, data_dim=data_dim, \
-                                               in_channels=out_ch, out_channels=out_ch)\
-
-    def forward(self, x, sigma):
-        x=x.to(torch.float32)
-        c_skip = self.data_eigs[None, :] * (torch.reciprocal(self.data_eigs[None, :] + (sigma**2)[:, None])) #bs, D
-        c_out = (sigma[:, None] * torch.sqrt(self.data_eigs)[None, :]) * \
-            (torch.reciprocal(torch.sqrt(self.data_eigs[None, :] + (sigma**2)[:, None]))) #bs, D
-        c_in = torch.reciprocal(torch.sqrt((sigma**2)[:, None] + self.data_eigs[None, :])) #bs, D
-        c_noise = sigma.log() / 4 #bs
-        weight = torch.sqrt(((sigma**2)[:, None] + self.data_eigs[None, :]) * \
-                            (torch.reciprocal(sigma[:, None] * torch.sqrt(self.data_eigs)[None, :]))) #bs, D
-        
-        F_x = self.model((c_in * x).to(torch.float32), c_noise)
-        assert F_x.dtype == torch.float32
-        D_x = c_skip * x + c_out * F_x.to(torch.float32)
-        return D_x, weight   
-    
-#----------------------------------------------------------------------------
-#IFs PreConditioning Implementation for HD and toy data
-#These are the main versions we use in paper experiments
-
-
-@persistence.persistent_class
-class IFsPreCond(torch.nn.Module):
-    def __init__(self, 
-                img_resolution,                     # Image resolution.
-                img_channels,                       # Number of color channels.
-                label_dim       = 0,                # Number of class labels, 0 = unconditional.
-                use_fp16        = False,            # Execute the underlying model at FP16 precision?
-                data_eigs = None,                   # Eigenvals for train dset 
-                g = None,                           # Constant g vector for IFs sigma schedule
-                W=None,                             # Mat w/ cols being eigenvectors of train dset 
-                space='ES',                         # Space to train Net in 
-                model_type = "DhariwalNet",         # Architecture to be used
-                sigma_min = 0,                      # Min noise level supported
-                sigma_max = float("inf"),           # Max noise level supported
-                gamma0 = 5e-4,                      # Init melting kernel width 
-                rho = 1.,                           # Exp. growth constant for IFs sigma schedule
-                M = 1000,                           # M param for noise conditioning input 
-                device = torch.device('cuda'),     
-                **model_kwargs,
-                 ):
-        super().__init__()
-        
-        self.img_resolution = img_resolution
-        self.img_channels = img_channels
-        self.label_dim = label_dim
-        self.use_fp16 = use_fp16
-        self.sigma_min = sigma_min
-        self.sigma_max = sigma_max
-        
-        self.data_eigs = data_eigs
-        self.W = torch.from_numpy(W).type(torch.float32).to(device)
-        self.g =g 
-        self.rho=rho
-        self.gamma0 = gamma0
-        self.M = M 
-        self.device=device
-        self.space = space 
-        
-        #setup model
-        self.model = globals()[model_type](img_resolution=img_resolution, in_channels=img_channels, \
-                                           out_channels=img_channels, label_dim=label_dim, **model_kwargs)
-
-    def _get_Sigmad(self):
-       sigma_d = torch.from_numpy(self.data_eigs)\
-           .type(torch.float32).to(self.device)
-       return sigma_d 
-   
-    def _get_Sigman(self, ts): 
-        exp_term = (torch.ones(self.g.shape[0]).to(self.device) + self.g)[None, :] * ts[:, None] #bs, dim
-        sigma_n = self.gamma0*torch.exp(self.rho*exp_term) 
-        return sigma_n 
-    
-    def _get_Sigma_star(self, sigmad, sigman): 
-        sigma_star = sigmad[None, :] + sigman
-        return sigma_star 
-    
-    def _get_Sigmao(self, sigmad, sigman, sigma_star): 
-        sigma_star_inv = torch.reciprocal(sigma_star) 
-        sigma_o = sigmad[None, :] - 2*sigmad[None, :]*sigma_star_inv*sigmad[None, :] 
-        sigma_o += sigmad[None, :]*sigma_star_inv*sigmad[None, :]*sigma_star_inv*sigmad[None, :] 
-        sigma_o += sigmad[None, :]*sigma_star_inv*sigman*sigma_star_inv*sigmad[None, :]
-        return sigma_o               
-        
-    def forward(self, x, ts, class_labels=None, force_fp32=False, **model_kwargs):
-        
-        x = x.to(torch.float32) #in ES [bs, C, H, W]!!! 
-
-        #get Sigma_n's, Sigmad, Sigma_stars, Sigma_o
-        sigmad = self._get_Sigmad()
-        sigman = self._get_Sigman(ts)
-        sigma_star = self._get_Sigma_star(sigmad, sigman)
-        sigma_o = self._get_Sigmao(sigmad, sigman, sigma_star)
-        
-        
-        #setup class labels and precision
-        class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if \
-            class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim)
-        dtype = torch.float16 if (self.use_fp16 and not force_fp32 and x.device.type == 'cuda') else torch.float32
-
-        #now get C_in, C_out, C_skip, C_noise
-        c_in = torch.sqrt(torch.reciprocal(sigma_star)) 
-        if torch.any(sigma_o < 0):
-            print('*'*40)
-            print('Sigma_o has negative entries!! This should not happen!')
-            print('*'*40)
-        c_out = torch.sqrt(sigma_o) 
-        weight = torch.reciprocal(c_out)
-        c_skip = sigmad[None, :]*torch.reciprocal(sigma_star)
-        c_noise = (self.M -1)*ts 
-        
-        #get net input 
-        model_input = torch.einsum('ij, bjk -> bik', self.W, \
-                                   (c_in*x.reshape(x.shape[0], -1)).unsqueeze(-1)).squeeze(-1) if self.space=='IS' else c_in*x.reshape(x.shape[0], -1) #bs, D
-        
-        #get net output
-        F_x = self.model(model_input.to(dtype).reshape(x.shape), c_noise, class_labels=class_labels, **model_kwargs) #bs, C, H, W
-        assert F_x.dtype == torch.float32
-        
-        if self.space=='ES':
-            #compute D_x in ES 
-            D_x = c_skip*x.reshape(x.shape[0], -1) + c_out*F_x.reshape(x.shape[0], -1) #bs, D
-        else: 
-            #compute D_x in IS 
-            D_x_cskip_term = torch.einsum('ij, bjk -> bik', self.W, (c_skip*x.reshape(x.shape[0], -1)).unsqueeze(-1)).squeeze(-1) #bs, D in IS
-            D_x_cout_term = torch.einsum('ij, bjk -> bik', self.W.T, F_x.reshape(x.shape[0], -1).unsqueeze(-1)).squeeze(-1) #bs, D in ES
-            D_x_cout_term *= c_out  #bs, D in ES 
-            D_x_cout_term = torch.einsum('ij, bjk -> bik', self.W, D_x_cout_term.unsqueeze(-1)).squeeze(-1) #bs, D  in IS 
-            D_x = D_x_cskip_term + D_x_cout_term #bs, D in IS
-               
-        return D_x, weight 
-
-@persistence.persistent_class
-class IFsToyPreCond(torch.nn.Module):
-    def __init__(self, 
-                 data_eigs = None, #np array containing eigenvals for original dataset 
-                 g = None, #torch tensor to be used for noise cov diag construction.
-                 W=None, #mat containing date eigenvectors in its cols.
-                 space='ES', #space we should train model on 
-                 img_res = 8, #resolution of imgs to be fed to conv layers.
-                 channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
-                 fc_embed_dim = 2,  # Dimensionality for Gaussian random feature embeddings for fc layers 
-                 conv_embed_dim = 256,  # Dimensionality for Gaussian random feature embeddings for conv layers
-                 data_dim=2, #dimensionality of dat we will feed through Net 
-                 out_ch=1, #number of channels in output of final conv layer
-                 model_type = "ToyConvUNet", #class name for underlying model 
-                 sigma_min = 0, #minimum supported  noise level
-                 sigma_max = float("inf"), #max supported noise level
-                 gamma0 = 5e-4, #gamma0 for noise cov diag
-                 rho = 1.,  #rho for noise cov diag
-                 M = 1000, #M for C_noise (same as DDPM)
-                 device = torch.device('cuda'),
-    ):
-        super().__init__()
-        self.data_eigs = data_eigs
-        self.W = torch.from_numpy(W).type(torch.float32).to(device)
-        self.g =g 
-        self.rho=rho
-        self.gamma0 = gamma0
-        self.M = M 
-        self.device=device
-        self.sigma_min=sigma_min
-        self.sigma_max=sigma_max
-        
-        #setup space arg
-        assert space in ['ES', 'IS']
-        self.space = space 
-        
-        #setup model 
-        assert model_type in ['ToyConvUNet', 'ToySongUNet']
-        if model_type == 'ToyConvUNet': 
-            self.model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
-                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
-        else: 
-            #am lealving defaults for DDPM++ arch 
-            self.model = globals()[model_type](img_resolution=img_res, data_dim=data_dim, in_channels=out_ch, out_channels=out_ch)
-            
-    def _get_Sigmad(self):
-       sigma_d = torch.from_numpy(self.data_eigs)\
-           .type(torch.float32).to(self.device)
-       return sigma_d 
-   
-    def _get_Sigman(self, ts): 
-        exp_term = (torch.ones(self.g.shape[0]).to(self.device) + self.g)[None, :] * ts[:, None] #bs, dim
-        sigma_n = self.gamma0*torch.exp(self.rho*exp_term) 
-        return sigma_n 
-    
-    def _get_Sigma_star(self, sigmad, sigman): 
-        sigma_star = sigmad[None, :] + sigman
-        return sigma_star 
-    
-    def _get_Sigmao(self, sigmad, sigman, sigma_star): 
-        sigma_star_inv = torch.reciprocal(sigma_star) 
-        sigma_o = sigmad[None, :] - 2*sigmad[None, :]*sigma_star_inv*sigmad[None, :] 
-        sigma_o += sigmad[None, :]*sigma_star_inv*sigmad[None, :]*sigma_star_inv*sigmad[None, :] 
-        sigma_o += sigmad[None, :]*sigma_star_inv*sigman*sigma_star_inv*sigmad[None, :]
-        return sigma_o    
-    
-    def forward(self, x, ts):
-        
-        #get Sigma_n's, Sigmad, Sigma_stars, Sigma_o
-        #all of these are in ES! 
-        sigmad = self._get_Sigmad()
-        sigman = self._get_Sigman(ts)
-        sigma_star = self._get_Sigma_star(sigmad, sigman)
-        sigma_o = self._get_Sigmao(sigmad, sigman, sigma_star)
-        
-        #now get C_in, C_out, C_skip, C_noise
-        #Again, all of these are in ES 
-        c_in = torch.sqrt(torch.reciprocal(sigma_star)) 
-        if torch.any(sigma_o < 0):
-            print('*'*40)
-            print('Sigma_o has negative entries!! This should not happen!')
-            print('*'*40)
-        c_out = torch.sqrt(sigma_o) 
-        weight = torch.reciprocal(c_out)
-        c_skip = sigmad[None, :]*torch.reciprocal(sigma_star)
-        c_noise = (self.M -1)*ts 
-        
-        #get net input 
-        model_input = torch.einsum('ij, bjk -> bik', self.W, (c_in*x).unsqueeze(-1)).squeeze(-1) if self.space=='IS' else c_in*x
-        
-        #get net output
-        F_x = self.model(model_input.to(torch.float32), c_noise, class_labels=None, augment_labels=None) 
-        assert F_x.dtype == torch.float32
-        
-        if self.space=='ES':
-            #compute D_x in ES 
-            D_x = c_skip*x + c_out*F_x 
-        else: 
-            #compute D_x in IS 
-            D_x_cskip_term = torch.einsum('ij, bjk -> bik', self.W, (c_skip*x).unsqueeze(-1)).squeeze(-1) #bs, D
-            D_x_cout_term = torch.einsum('ij, bjk -> bik', self.W.T, F_x.unsqueeze(-1)).squeeze(-1) #bs, D
-            D_x_cout_term *= c_out  #bs, D
-            D_x_cout_term = torch.einsum('ij, bjk -> bik', self.W, D_x_cout_term.unsqueeze(-1)).squeeze(-1) #bs, D
-            D_x = D_x_cskip_term + D_x_cout_term
-               
-        return D_x, weight 
 
 #-------------------------------------------------------------------------------------
-#Def network class for CFM
+#Def network class for VFM
 
-#Start with toy case
 @persistence.persistent_class
-class  IFsCFMToyNet(torch.nn.Module):
+class  VFMToyNet(torch.nn.Module):
+    """
+    Wrapper for calling u (flow time)
+    and v (dynamics time) nets. 
+    
+    Supports either MLP or ToyConvUNet architectures 
+    """
     def __init__(self, 
                  channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
                  fc_embed_dim = 2,  # Dimensionality for Gaussian random feature embeddings for fc layers 
@@ -1370,52 +1066,18 @@ class  IFsCFMToyNet(torch.nn.Module):
         self.M = M 
         assert model_type in ["ToyConvUNet", "ToyMLP"]
         if model_type=="ToyConvUNet":
-            self.model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
+            self.unet_model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
+                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch)
+            self.vnet_model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
                                                conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
         else:
-            self.model = globals()[model_type](dim=data_dim, time_varying=True)
+            self.unet_model = globals()[model_type](dim=data_dim, time_varying=True)
+            self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True)
         
-    def forward(self, x, ts): 
-        cnoise = (self.M-1)*ts if self.model_type=="ToyConvUNet" else ts 
-        vt = self.model(x, cnoise) 
-        return vt 
-    
-    
-#HD case 
-#Note that we can either use TongUNet arch 
-#or one of our original EDM archs here 
-
-@persistence.persistent_class
-class  IFsCFMNet(torch.nn.Module):
-    def __init__(self,
-                 dim=(3, 32, 32),
-                 model_type = "adm",
-                 M = 1000,
-                 use_fp16 = False,
-                 label_dim = 0, 
-                 **model_kwargs,
-                 ):
-        super().__init__()
-        self.M = M 
-        self.model_type = model_type
-        self.use_fp16 = use_fp16       
-        self.label_dim = label_dim 
-        if self.model_type == 'TongUNet':
-            self.model = UNetModelWrapper(dim=dim, **model_kwargs)
-        else: 
-            self.model = globals()[model_type](img_resolution=dim[-1], in_channels=dim[0], \
-                                               out_channels=dim[0], label_dim=label_dim, **model_kwargs)
-        
-    def forward(self, x, ts, class_labels=None, **model_kwargs):
-        
-        class_labels = None if self.label_dim == 0 else torch.zeros([1, self.label_dim], device=x.device) if class_labels is None else class_labels.to(torch.float32).reshape(-1, self.label_dim)
-        
-        if self.model_type == "TongUNet": 
-            vt = self.model(ts, x, y=None) #no cond implementation 
-        else: 
-            c_noise = (self.M -1)*ts 
-            vt = self.model(x, c_noise, class_labels=class_labels, \
-                            **model_kwargs) #using same syntax as in EDM, but will only train uncond. for now
-        return vt #bs, C, H, W    
+    def forward(self, x0_tau, xt_tau, taus): 
+        cnoise = (self.M-1)*taus if self.model_type=="ToyConvUNet" else taus
+        u = self.unet_model(x0_tau, cnoise)
+        v = self.vnet_model(xt_tau, cnoise) 
+        return u, v
     
     

@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 
-Implements training on toy datasets using our schedule/end points and FM 
-schemes. Only IFs Gaussian Paths flow matching and Exact OT flow matching 
-are currently supported.
+Implements VFM model training for toy datasets 
 
 Supports original ToyConvUNet and simpler/smaller
 ToyMLP archs.
@@ -18,7 +16,7 @@ import click
 import torch
 import dnnlib
 from torch_utils import distributed as dist
-from training import toy_training_loop_cfm
+from training import toy_training_loop_vfm
 
 import warnings
 warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides') # False warning printed by PyTorch 1.12.
@@ -29,21 +27,20 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 # Main options.
 @click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                type=str, required=True)
 @click.option('--data_name',               help='Name of toy dset to use', metavar='STR',                                                                  type=str, required=True)
-@click.option('--data_dim',                help='Dimensionality of toy data.', metavar='INT',                                                              type=int, required=True)
-@click.option('--augment_to',              help='Dimension we should augment our original toy dset to. Defaults to 0 (no augmentation)', metavar='INT',    type=int, default=0, show_default=True)
+@click.option('--data_dim',                help='Number of dimensions in original dset (w/out projection)', metavar='INT',                                 type=int, required=True)
 @click.option('--dims_to_keep',            help='Number of dimensions to keep', metavar='INT',                                                             type=int, required=True)
-@click.option('--g_scaling',               help='Scaling factor to be applied to g tensor.', metavar='FLOAT',                                              type=float, default=1.0, show_default=True)
-@click.option('--gamma0',                  help='Initial melting kernel width', metavar='FLOAT',                                                           type=click.FloatRange(min=5e-4, min_open=False), default=5e-4, show_default=True)
-@click.option('--rho',                     help='Constant for exponential growth/inflation.', metavar='FLOAT',                                             type=click.FloatRange(min=1.0, min_open=False), default=1.0, show_default=True)
-@click.option('--sigma',                   help='Sigma val for exactot fm class', metavar='FLOAT',                                                         type=float, default=0.1, show_default=True)
-@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0 in exactot case.', metavar='FLOAT',          type=float, default=1.0, show_default=True)
-@click.option('--tmin',                    help='Smallest melt time/sigma to sample.', metavar='FLOAT',                                                    type=click.FloatRange(min=1e-7, min_open=False), default=1e-7, show_default=True)
-@click.option('--tmax',                    help='Largest melt time/sigma to sample', metavar='FLOAT',                                                      type=click.FloatRange(min=1.0, min_open=False), default=15.01, show_default=True)
-@click.option('--arch',                    help='Network architecture to use.', metavar='ToyConvUNet|ToyMLP',                                              type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
-@click.option('--space',                   help='Space Net should be trained on. Defaults to eigen-space (ES)', metavar='ES|IS',                           type=click.Choice(['ES', 'IS']), default='ES', show_default=True)
-@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='ifs|exactot',                                             type=click.Choice(['ifs', 'exactot']), default='ifs', show_default=True)
-@click.option('--ode_type',                help='Whether to use scaled or unscaled ODE', metavar='scaled|unscaled',                                        type=click.Choice(['scaled', 'unscaled']), default='scaled', show_default=True)
-@click.option('--use_precond',             help='Whether or not to apply pre-conditioning to net inputs and targets.',                                     is_flag=True)
+@click.option('--n_trajs',                 help='Number of trajectories to sample when creating dset.', metavar='INT',                                     type=int, default=50, show_default=True)
+@click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                  type=float, default=1.0, show_default=True)
+@click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                           type=float, default=1e-3, show_default=True)
+@click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=10.25, show_default=True)
+@click.option('--project',                 help='Project original dset to higher dimensional space',                                                       is_flag=True)
+@click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                 type=int, default=3, show_default=True)
+@click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
+@click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                type=float, default=1.2, show_default=True)
+@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                         type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
+@click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
+@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
+@click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
 
 
 # Hyperparameters.
@@ -51,12 +48,19 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--batch',                  help='Total batch size', metavar='INT',                                                                          type=click.IntRange(min=1), default=8192, show_default=True)
 @click.option('--batch-gpu',              help='Limit batch size per GPU', metavar='INT',                                                                  type=click.IntRange(min=1), default=1024, show_default=True)
 @click.option('--lr',                     help='Learning rate', metavar='FLOAT',                                                                           type=click.FloatRange(min=0, min_open=True), default=1e-5, show_default=True)
-@click.option('--use_ema',                 help='Whether or not to apply EMA to model params',                                                              is_flag=True)
+@click.option('--use_ema',                help='Whether or not to apply EMA to model params',                                                              is_flag=True)
 @click.option('--ema',                    help='EMA half-life (if using EMA)', metavar='MIMG',                                                             type=click.FloatRange(min=0), default=0.5, show_default=True)
+@click.option('--alpha',                  help='Scale for flow net component of loss', metavar='FLOAT',                                                    type=float, default=1.0, show_default=True)
+@click.option('--beta',                   help='Scale for dynamics net component of loss', metavar='FLOAT',                                                type=float, default=1.0, show_default=True)
+@click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                              type=float, default=1.0, show_default=True)
+
 
 # Performance-related.
 @click.option('--ls',                     help='Loss scaling', metavar='FLOAT',                                                                            type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
 @click.option('--bench',                  help='Enable cuDNN benchmarking', metavar='BOOL',                                                                type=bool, default=True, show_default=True)
+@click.option('--cache',                  help='Cache dataset in CPU memory', metavar='BOOL',                                                              type=bool, default=True, show_default=True)
+@click.option('--workers',                help='DataLoader worker processes', metavar='INT',                                                               type=click.IntRange(min=1), default=1, show_default=True)
+
 
 # I/O-related.
 @click.option('--desc',                   help='String to include in result dir name', metavar='STR',                                                      type=str)
@@ -68,11 +72,10 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--resume',                 help='Resume from previous training state', metavar='PT',                                                        type=str)
 @click.option('-n', '--dry-run',          help='Print training options and exit',                                                                          is_flag=True)
 
+
 def main(**kwargs):
     """
-    Similar to toy_train.py, but for CFM training.
-    
-    Eventually I might wish to merge both of these into a single set up scripts -- tbd. 
+    Sets up main args needed for toy_training_loop_vfm.py 
     """
     
     opts = dnnlib.EasyDict(kwargs)
@@ -84,40 +87,39 @@ def main(**kwargs):
     device = torch.device(device_name)
     
     #setup data_dim to match augmented dims (if using this option)
-    working_data_dim = opts.data_dim if opts.augment_to==0 else opts.augment_to
+    working_data_dim = opts.project_to if opts.project else opts.data_dim
     
 
-    
     # Initialize config dict.
     # Set up simplified dset, optim, loss, network kwargs 
     c = dnnlib.EasyDict()
     
-    c.dataset_kwargs = dnnlib.EasyDict(dset_name = opts.data_name, orig_data_dim=opts.data_dim, \
-                                       working_data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                           augment_to=opts.augment_to, eps=opts.eps)
+    #setup dset args
+    proj_specs = dnnlib.EasyDict(project_to=opts.project_to, proj_type=opts.proj_type, temp=opts.project_temp) if opts.project else None
+    c.dataset_kwargs = dnnlib.EasyDict(dset_name = opts.data_name, n_trajs=opts.n_trajs, T=opts.end_t, \
+                                       dt=opts.dt, sigma=opts.sigma_dset, project=opts.project, proj_specs=proj_specs)
+        
+    #setup dataloder kwargs 
+    c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
+
     
+    #set up additional args to sample x0s
+    c.x0_sampler_kwargs = dnnlib.EasyDict(data_dim=opts.data_dim, working_data_dim=working_data_dim, \
+                                          dims_to_keep=opts.dims_to_keep, eps=opts.eps)
+    
+    #setup optimizer kwargs 
     c.optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=opts.lr, betas=[0.9,0.999], eps=1e-8)
     
+    #setup loss kwargs
+    c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
+                                        sigma=opts.sigma_fm, class_name='training.loss.VFMToyLoss')
     
-    if opts.flow_matcher_type=='ifs':
-        c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                        g_scaling=opts.g_scaling, rho=opts.rho, gamma0=opts.gamma0, ODE_type=opts.ode_type, \
-                                            space=opts.space, t_min=opts.tmin, \
-                                            t_max=opts.tmax, apply_precond=opts.use_precond, \
-                                                class_name='training.loss.IFsCFMToyLoss')
-    elif opts.flow_matcher_type =='exactot':
-        c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                        t_min=opts.tmin, t_max=opts.tmax, \
-                                        sigma=opts.sigma, class_name='training.loss.IFsCFMToyLoss')
-    else:
-        raise NotImplementedError('Only IFs and ExactOT FM schemes implemented!') 
-    
-    
+    #setup net kwargs 
     if opts.arch == "ToyConvUNet": 
         c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], fc_embed_dim=2, conv_embed_dim=256, \
-                                               data_dim=working_data_dim, out_ch=1, class_name='training.networks.IFsCFMToyNet') 
+                                               data_dim=working_data_dim, out_ch=1, class_name='training.networks.VFMToyNet') 
     elif opts.arch=='ToyMLP': 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, class_name='training.networks.IFsCFMToyNet')
+        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, class_name='training.networks.VFMToyNet')
 
     else:
         raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
@@ -130,8 +132,8 @@ def main(**kwargs):
     c.update(batch_size=opts.batch, batch_gpu=opts.batch_gpu)
     c.update(loss_scaling=opts.ls, cudnn_benchmark=opts.bench)
     c.update(kimg_per_tick=opts.tick, snapshot_ticks=opts.snap, state_dump_ticks=opts.dump)
+    c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma)
     
-
     # Random seed.
     if opts.seed is not None:
         c.seed = opts.seed
@@ -139,7 +141,6 @@ def main(**kwargs):
         seed = torch.randint(1 << 31, size=[], device=device)
         torch.distributed.broadcast(seed, src=0)
         c.seed = int(seed)
-
 
     # Resume learning
     if opts.resume is not None:
@@ -198,7 +199,7 @@ def main(**kwargs):
     
 
     # Train.
-    toy_training_loop_cfm.training_loop(**c)
+    toy_training_loop_vfm.training_loop(**c)
 
 #----------------------------------------------------------------------------
 

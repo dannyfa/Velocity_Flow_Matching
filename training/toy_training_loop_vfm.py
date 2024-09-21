@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-training_loop for toy dsets using CFM 
-
-Essentially same as toy_training_loop
-but using CFM loss, net, and etc.
+Actually does training for toy VFM models.
 
 """
 
@@ -21,13 +18,14 @@ from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import misc
 from torch.utils.tensorboard import SummaryWriter
-from torch_cfm.utils import calc_trajectories, plot_trajectories 
 
 #----------------------------------------------------------------------------
 
 def training_loop(
     run_dir             = '.',      # Output directory.
     dataset_kwargs      = {},       # Options for training set.
+    data_loader_kwargs  = {},       # Options for constructing dataloader.
+    x0_sampler_kwargs   = {},       # Options for x0 sampling.
     network_kwargs      = {},       # Options for model and preconditioning.
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
@@ -48,6 +46,9 @@ def training_loop(
     resume_kimg         = 0,        # Start from the given training progress.
     cudnn_benchmark     = True,     # Enable torch.backends.cudnn.benchmark?
     device              = torch.device('cuda'),
+    alpha               = 1.0,      #scale for flow net loss 
+    beta                = 1.0,      #scale for dynamics net loss
+    gamma               = 1.0,      #scale for Lie derivative loss 
 ):
     # Initialize.
     start_time = time.time()
@@ -71,33 +72,47 @@ def training_loop(
         writer_dir = os.path.join(run_dir, 'TB_logs')
         os.makedirs(writer_dir, exist_ok=True) 
         writer = SummaryWriter(log_dir = writer_dir)
+        
+    #setup dataset and loader 
+    dist.print0('Constructing toy dataset...')
+    dataset_obj, dset_samples = dnnlib.util.get_toy_dynamicdset(**dataset_kwargs) 
+    dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)  
+    dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, \
+                                                        batch_size=batch_gpu, **data_loader_kwargs))
+        
+    
+    #calc W
+    dist.print0('Calculating eigendecomposition...')
+    if dist.get_rank() != 0:
+        torch.distributed.barrier() #rank 0 goes first
+        
+    _, _, W = dnnlib.util.get_eigenvals_basis(np.array(dset_samples).reshape(-1, x0_sampler_kwargs.working_data_dim), \
+                                             n_comp=x0_sampler_kwargs.working_data_dim)
+    W = torch.from_numpy(W).type(torch.float32).to(device)
+    del dset_samples #save mem 
+    
+    if dist.get_rank() == 0: 
+        torch.distributed.barrier() #other ranks follow    
 
-    # Compute eigen-decomp. for dataset if using IFs flow_matcher
-    if loss_kwargs.flow_matcher_type == 'ifs': 
-        dist.print0('Computing eigen-decomposition for ifs FM...')
-        large_sample = dnnlib.util.get_toy_dset(dataset_kwargs.dset_name, 70000, augment_to=dataset_kwargs.augment_to)[0] 
-        data_eigs, _, W = dnnlib.util.get_eigenvals_basis(large_sample, n_comp=dataset_kwargs.working_data_dim) 
-        data_eigs = torch.from_numpy(data_eigs).type(torch.float32).to(device) 
-        W = torch.from_numpy(W).type(torch.float32).to(device)
-        loss_kwargs.update(data_eigs=data_eigs, W=W)
-        del large_sample #conserve mem 
-
-    # Construct network.
+    # Construct u, v networks 
     dist.print0('Constructing network...')
     net = dnnlib.util.construct_class_by_name(**network_kwargs) # subclass of torch.nn.Module
+    
     net.train().requires_grad_(True).to(device)
+    
     if dist.get_rank() == 0:
         with torch.no_grad():
-            images = torch.zeros([batch_gpu, dataset_kwargs.working_data_dim], device=device)
+            images = torch.zeros([batch_gpu, x0_sampler_kwargs.working_data_dim], device=device)
             ts = torch.ones([batch_gpu], device=device)
-            misc.print_module_summary(net, [images, ts], max_nesting=2)
+            misc.print_module_summary(net, [images, images, ts], max_nesting=2) #this might not print well (tbd)
+           
 
     # Setup optimizer and lossfn
     dist.print0('Setting up optimizer and loss fn...')
     loss_fn = dnnlib.util.construct_class_by_name(**loss_kwargs) 
     optimizer = dnnlib.util.construct_class_by_name(params=net.parameters(), **optimizer_kwargs) # subclass of torch.optim.Optimizer
     
-    #init Dist mode for net 
+    #init Dist mode for nets 
     ddp = torch.nn.parallel.DistributedDataParallel(net, device_ids=[device], broadcast_buffers=False)
     
     #copy original model weights into EMA (if using it)
@@ -140,23 +155,30 @@ def training_loop(
     dist.update_progress(cur_nimg // 1000, total_kimg)
     stats_jsonl = None
     gs = 0 
+    loss_scales = torch.Tensor([alpha, beta, gamma]).type(torch.float32).to(device)
     while True:
 
         # Accumulate gradients.
         optimizer.zero_grad(set_to_none=True)
         tot_scalar_loss = 0
+        tot_separate_losses = torch.zeros(3).type(torch.float32).to(device)
         for round_idx in range(num_accumulation_rounds):
-            with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)):  
-                W = loss_fn.flowmatcher.W if loss_kwargs.flow_matcher_type=='ifs' else None 
-                x1, x0 = dnnlib.util.get_cfm_samples(dataset_kwargs, batch_gpu, device, \
-                                                     W, loss_fn.flow_matcher_type)
-                loss = loss_fn(net=ddp, x1=x1, x0=x0) #bs, dim 
-                #log in using original training stats
-                training_stats.report('Loss/loss', loss)
-                #compute scalar (final) loss
-                round_scalar_loss = loss.sum().mul(loss_scaling / batch_gpu_total)
-                #accumulate loss for rounds 
-                tot_scalar_loss += round_scalar_loss.item()
+            with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)): 
+                x1s = next(dataset_iterator) 
+                x0s = dnnlib.util.get_xt_zero_samples(x0_sampler_kwargs, batch_gpu, device, W, concatenated=True) 
+                x0_1, xdt_1 = x1s[0].type(torch.float32).to(device), x1s[1].type(torch.float32).to(device) 
+                x0_0, xdt_0 = x0s[:, 0:x0_sampler_kwargs.working_data_dim], x0s[:, x0_sampler_kwargs.working_data_dim:] 
+                loss = loss_fn(net=ddp, x0_0=x0_0, x0_1=x0_1, xdt_0=xdt_0, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
+                loss = loss * loss_scales[:, None, None] #3, bs, dim 
+                #log in using original training stats - no grads here! 
+                training_stats.report('Loss/loss', torch.sum(loss.detach(), dim=0)) #bs, dim
+                #now sum over loss components, dims and take avg over batch items 
+                round_scalar_loss = loss.sum()*(loss_scaling/batch_gpu_total)
+                #get separate loss items too (for TB logging) -- do NOY prop. gradients here!
+                separate_losses = torch.sum(torch.sum(loss.detach(), dim=2), dim=1)*(loss_scaling/batch_gpu_total) #3 
+                tot_separate_losses += separate_losses
+                #accumulate loss for rounds  
+                tot_scalar_loss += round_scalar_loss.item() 
                 #accumulate grads 
                 round_scalar_loss.backward()
 
@@ -169,7 +191,7 @@ def training_loop(
         for param in net.parameters():
             if param.grad is not None:
                 torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-                
+                                     
         optimizer.step()
 
         # Update EMA, if using it
@@ -179,11 +201,15 @@ def training_loop(
                 ema_halflife_nimg = min(ema_halflife_nimg, cur_nimg * ema_rampup_ratio)
             ema_beta = 0.5 ** (batch_size / max(ema_halflife_nimg, 1e-8)) 
             for p_ema, p_net in zip(ema.parameters(), net.parameters()): 
-                p_ema.copy_(p_net.detach().lerp(p_ema, ema_beta))
+                p_ema.copy_(p_net.detach().lerp(p_ema, ema_beta))           
         
         #Log loss to TB
-        writer.add_scalar('train_loss', tot_scalar_loss/num_accumulation_rounds, gs)
-        gs+=1
+        if dist.get_rank()==0: 
+            writer.add_scalar('tot_train_loss', tot_scalar_loss, gs)
+            writer.add_scalar('flow_train_loss', tot_separate_losses[0].item(), gs)
+            writer.add_scalar('dyn_train_loss', tot_separate_losses[1].item(), gs)
+            writer.add_scalar('lie_derivative_loss', tot_separate_losses[2].item(), gs)
+            gs+=1
 
         # Perform maintenance tasks once per tick.
         cur_nimg += batch_size
@@ -239,12 +265,7 @@ def training_loop(
             for tag, value in net.named_parameters():
                 if value.grad is not None:
                     writer.add_histogram(tag+"/grad", value.grad.cpu(), gs) 
-            #calc and log trajs 
-            traj = calc_trajectories(net, dataset_kwargs, loss_fn, device)
-            traj_fig = plot_trajectories(traj.cpu().numpy())
-            writer.add_figure('ODE_trajs', traj_fig, gs, close=True)
-            
-            
+
         # Update logs.
         training_stats.default_collector.update()
         if dist.get_rank() == 0:
