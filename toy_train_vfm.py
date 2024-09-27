@@ -32,7 +32,7 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--n_trajs',                 help='Number of trajectories to sample when creating dset.', metavar='INT',                                     type=int, default=50, show_default=True)
 @click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                  type=float, default=1.0, show_default=True)
 @click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                           type=float, default=1e-3, show_default=True)
-@click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=10.25, show_default=True)
+@click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=0.25, show_default=True)
 @click.option('--project',                 help='Project original dset to higher dimensional space',                                                       is_flag=True)
 @click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                 type=int, default=3, show_default=True)
 @click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
@@ -53,6 +53,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--alpha',                  help='Scale for flow net component of loss', metavar='FLOAT',                                                    type=float, default=1.0, show_default=True)
 @click.option('--beta',                   help='Scale for dynamics net component of loss', metavar='FLOAT',                                                type=float, default=1.0, show_default=True)
 @click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                              type=float, default=1.0, show_default=True)
+@click.option('--grad_clip',              help='Whether or not to clip model gradient norm.',                                                              is_flag=True)
+@click.option('--grad_clip_val',          help='Max value model gradients should be clipped to.', metavar='FLOAT',                                         type=float, default=1.0, show_default=True)
 
 
 # Performance-related.
@@ -133,6 +135,7 @@ def main(**kwargs):
     c.update(loss_scaling=opts.ls, cudnn_benchmark=opts.bench)
     c.update(kimg_per_tick=opts.tick, snapshot_ticks=opts.snap, state_dump_ticks=opts.dump)
     c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma)
+    c.update(grad_clip=opts.grad_clip, grad_clip_val=opts.grad_clip_val)
     
     # Random seed.
     if opts.seed is not None:

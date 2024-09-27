@@ -48,7 +48,9 @@ def training_loop(
     device              = torch.device('cuda'),
     alpha               = 1.0,      #scale for flow net loss 
     beta                = 1.0,      #scale for dynamics net loss
-    gamma               = 1.0,      #scale for Lie derivative loss 
+    gamma               = 1.0,      #scale for Lie derivative loss
+    grad_clip           = False,    #whether or no to apply grad norm clipping to model params
+    grad_clip_val       = None,     #val to clip model grad norms to.
 ):
     # Initialize.
     start_time = time.time()
@@ -191,7 +193,13 @@ def training_loop(
         for param in net.parameters():
             if param.grad is not None:
                 torch.nan_to_num(param.grad, nan=0, posinf=1e5, neginf=-1e5, out=param.grad)
-                                     
+        
+        #clip model gradient norms, if desired
+        if grad_clip: 
+            assert grad_clip_val != None, 'Need a value to clip grads to!'
+            torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip_val)
+        
+        #then step 
         optimizer.step()
 
         # Update EMA, if using it
