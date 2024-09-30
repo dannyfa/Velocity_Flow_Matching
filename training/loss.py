@@ -117,9 +117,7 @@ class VFMToyLoss:
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma)
     
     def calc_lie_derivative(self, net, x0_tau, xt_tau, taus, u, v):
-        #get Jacobian for all net outputs w.r.t. inputs
-        x0_tau.requires_grad=True
-        xt_tau.requires_grad=True
+        #get Jacobian for all net outputs w.r.t. inputs! 
         taus.requires_grad=True
         net_jac = torch.autograd.functional.jacobian(net, (x0_tau, xt_tau, taus))
         
@@ -139,34 +137,36 @@ class VFMToyLoss:
         return lie_derivative
         
                 
-    def __call__(self, net, x0_0, x0_1, xdt_0, xdt_1, dt):
+    def __call__(self, net, x0_1, xdt_1, dt):
+        
+        #get x0_0, xdt_0
+        x0_0 = net.module.get_x0s(x0_1)
+        xdt_0 = net.module.get_x0s(xdt_1)
+       
         #sample taus
         taus = torch.rand(x0_0.shape[0], device=x0_0.device) # \tau \sim U[0,1]
         #sample ts 
         ts = torch.rand(xdt_0.shape[0], device=xdt_0.device) * dt #\t \sim U[0, dt]
         
-        #get x0/dt,taus and coresponding fields u0/dt,taus 
-        _, xtaus, utaus = self.tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, \
-                                                                            xdt_0=xdt_0, xdt_1=xdt_1, \
-                                                                                t=taus, seq=True)
-        x0_tau, xdt_tau = xtaus[0], xtaus[1]
-        u0_tau = utaus[0]
         
-        #get xt,tau, ut,tau 
-        _, xt_tau, ut_tau = self.t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, \
-                                                                                    t=(ts/dt), seq=False)
+        #get x0_tau, u0_tau
+        _, x0_tau, u0_tau = self.tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+        _, xdt_tau, _ = self.tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
         
-        xt_tau = xt_tau[0]
-        ut_tau = ut_tau[0] 
         
-        #now get net estimates ... 
+        #get xt_tau, ut_tau 
+        _, xt_tau, ut_tau = self.t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
+                
+        #now get net estimates for u,v ... 
         u, v = net(x0_tau, xt_tau, taus)
         
         #calc different loss pieces 
         flow_loss = (u - u0_tau)**2 #bs, dim
         dyn_loss = (v - ut_tau) **2 #bs, dim
+        
         #lie derivative 
         lie_loss = (self.calc_lie_derivative(net, x0_tau, xt_tau, taus, u, v))**2 #bs, dim
+        
         return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), lie_loss.unsqueeze(0)], dim=0) # 3, bs, dim  
 
 

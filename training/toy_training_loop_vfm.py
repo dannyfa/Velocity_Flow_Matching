@@ -167,10 +167,8 @@ def training_loop(
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)): 
                 x1s = next(dataset_iterator) 
-                x0s = dnnlib.util.get_xt_zero_samples(x0_sampler_kwargs, batch_gpu, device, W, concatenated=True) 
                 x0_1, xdt_1 = x1s[0].type(torch.float32).to(device), x1s[1].type(torch.float32).to(device) 
-                x0_0, xdt_0 = x0s[:, 0:x0_sampler_kwargs.working_data_dim], x0s[:, x0_sampler_kwargs.working_data_dim:] 
-                loss = loss_fn(net=ddp, x0_0=x0_0, x0_1=x0_1, xdt_0=xdt_0, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
+                loss = loss_fn(net=ddp, x0_1=x0_1, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
                 loss = loss * loss_scales[:, None, None] #3, bs, dim 
                 #log in using original training stats - no grads here! 
                 training_stats.report('Loss/loss', torch.sum(loss.detach(), dim=0)) #bs, dim

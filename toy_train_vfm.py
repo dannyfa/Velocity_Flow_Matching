@@ -41,6 +41,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
 @click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
 @click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
+@click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
+@click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
 
 
 # Hyperparameters.
@@ -125,8 +127,9 @@ def main(**kwargs):
 
     else:
         raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
+    
+    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width)
         
-
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
     c.use_ema = opts.use_ema

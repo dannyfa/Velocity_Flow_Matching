@@ -149,7 +149,7 @@ class ConditionalFlowMatcher:
     def sample_noise_like(self, x):
         return torch.randn_like(x)
 
-    def sample_location_and_conditional_flow(self, x0_0, x0_1, xdt_0=None, xdt_1=None, t=None, return_noise=False, seq=False):
+    def sample_location_and_conditional_flow(self, x0_0, x0_1, t=None, return_noise=False):
         """
         Compute the sample xt (drawn from N(t * x1 + (1 - t) * x0, sigma))
         and the conditional vector field ut(x1|x0) = x1 - x0, see Eq.(15) [1].
@@ -184,30 +184,14 @@ class ConditionalFlowMatcher:
             t = torch.rand(x0_0.shape[0]).type_as(x0_0)
         assert len(t) == x0_0.shape[0], "t has to have batch size dimension"
         
-        xs = [[x0_0, x0_1]]
-        
-        if seq:
-            #make sure we have all pts needed if deadling with sequence data 
-            assert xdt_0 != None
-            assert xdt_1 != None 
-            xs.append([xdt_0, xdt_1])
-        
-        #sample eps for xt calc and set up number of rounds 
-        eps = [self.sample_noise_like(x0_0), self.sample_noise_like(xdt_0)] if seq else [self.sample_noise_like(x0_0)]
-        n_rounds = 2 if seq else 1
-        
-        xts = []
-        uts = []
-        for n in range(n_rounds): 
-            xt = self.sample_xt(xs[n][0], xs[n][1], t, eps[n])
-            xts.append(xt)
-            ut = self.compute_conditional_flow(xs[n][0], xs[n][1], t, xt)
-            uts.append(ut)
-               
+        eps = self.sample_noise_like(x0_0)
+        xt = self.sample_xt(x0_0, x0_1, t, eps)
+        ut = self.compute_conditional_flow(x0_0, x0_1, t, xt)
+                       
         if return_noise:
-            return t, xts, uts, eps
+            return t, xt, ut, eps
         else:
-            return t, xts, uts
+            return t, xt, ut
 
     def compute_lambda(self, t):
         """Compute the lambda function, see Eq.(23) [3].
@@ -247,7 +231,7 @@ class ExactOptimalTransportConditionalFlowMatcher(ConditionalFlowMatcher):
         super().__init__(sigma)
         self.ot_sampler = OTPlanSampler(method="exact")
 
-    def sample_location_and_conditional_flow(self, x0_0, x0_1, xdt_0, xdt_1, t=None, return_noise=False, seq=False):
+    def sample_location_and_conditional_flow(self, x0_0, x0_1, t=None, return_noise=False):
         r"""
         Compute the sample xt (drawn from N(t * x1 + (1 - t) * x0, sigma))
         and the conditional vector field ut(x1|x0) = x1 - x0, see Eq.(15) [1]
@@ -277,31 +261,11 @@ class ExactOptimalTransportConditionalFlowMatcher(ConditionalFlowMatcher):
         ----------
         [1] Improving and Generalizing Flow-Based Generative Models with minibatch optimal transport, Preprint, Tong et al.
         """
-        if seq: 
-            #run OT coupling on seq data 
-            #and use results to get xts, uts
-            assert x0_0.shape[1] == xdt_0.shape[1]
-            assert x0_1.shape[1] == xdt_1.shape[1] 
-            
-            #concatenate samples per flow time 
-            x0 = torch.cat([x0_0, xdt_0], dim=1) #bs x 2d 
-            x1 = torch.cat([x0_1, xdt_1], dim=1) #bs x 2d 
-            
-            #run OT coupling/sampling on concatenated set 
-            x0, x1 = self.ot_sampler.sample_plan(x0, x1)
-            
-            #split sets again (after otc) 
-            x0_0, xdt_0 = x0[:, 0:x0_0.shape[1]], x0[:, x0_0.shape[1]:]
-            x0_1, xdt_1 = x1[:, 0:x0_1.shape[1]], x1[:, x0_1.shape[1]:] 
-            
-            return super().sample_location_and_conditional_flow(x0_0, x0_1, xdt_0=xdt_0, \
-                                                                xdt_1=xdt_1, t=t, return_noise=return_noise, seq=seq)
-        else: 
-            #run OT coupling on single time pt
-            #get xt, ut for this time pt 
-            x0, x1 = self.ot_sampler.sample_plan(x0_0, x0_1)
-            return super().sample_location_and_conditional_flow(x0, x1, xdt_0=None, xdt_1=None, \
-                                                                t=t, return_noise=return_noise, seq=False)
+        #run OT coupling on single time pt
+        #get xt, ut for this time pt 
+        x0_0, x0_1 = self.ot_sampler.sample_plan(x0_0, x0_1)
+        return super().sample_location_and_conditional_flow(x0_0, x0_1, t=t, return_noise=return_noise)
+    
 #for now, am NOT dealing with labels! 
 
 #    def guided_sample_location_and_conditional_flow(

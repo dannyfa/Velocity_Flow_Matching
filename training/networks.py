@@ -15,6 +15,7 @@ pre-conditioning for toy and image datasets.
 
 import numpy as np
 import torch
+import torch.distributions as D 
 from torch_utils import persistence
 from torch.nn.functional import silu
 from torch_cfm.models.unet.unet import UNetModelWrapper 
@@ -452,6 +453,62 @@ class ToyMLP(torch.nn.Module):
 
     def forward(self, x, t):
         return self.net(torch.cat([x, t[:, None]], dim=-1))
+
+#----------------------------------------------------------------------------
+#VAE encoder class -- from Miles' branch 
+
+@persistence.persistent_class
+class LatentVAE(torch.nn.Module):
+    
+    def __init__(self,input_size,output_size,num_hidden,hidden_size=10):
+
+        super().__init__()
+
+        mu = [torch.nn.Linear(input_size,hidden_size,bias=True), torch.nn.ReLU()]
+        u = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
+        d = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
+        
+        for _ in range(num_hidden):
+            mu.append(torch.nn.Linear(hidden_size,hidden_size))
+            mu.append(torch.nn.ReLU())
+            u.append(torch.nn.Linear(hidden_size,hidden_size))
+            u.append(torch.nn.ReLU())
+            d.append(torch.nn.Linear(hidden_size,hidden_size))
+            d.append(torch.nn.ReLU())
+            
+        mu.append(torch.nn.Linear(hidden_size,output_size))
+        u.append(torch.nn.Linear(hidden_size,output_size))
+        d.append(torch.nn.Linear(hidden_size,output_size))
+
+        self.mu = torch.nn.Sequential(*mu)
+        self.u = torch.nn.Sequential(*u)
+        self.d = torch.nn.Sequential(*d)
+    
+    def encode(self, x):
+        mu,u,d = self.mu(x),self.u(x),self.d(x)
+        u = u.unsqueeze(-1)
+        d = torch.exp(d)
+        return mu, u, d 
+    
+    def rsample(self, x):
+        mu,u,d = self.encode(x)
+        latent_dist = D.LowRankMultivariateNormal(mu, u, d)
+        z = latent_dist.rsample()
+        return z 
+        
+    def forward(self,x):
+        
+        mu,u,d = self.encode(x)
+        latent_dist = D.LowRankMultivariateNormal(mu, u, d)
+        z = latent_dist.rsample()
+        #print(z.shape)
+        #print(latent_dist.entropy().shape)
+        
+        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+        #assert False
+        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
+        
+        return z,-kl_term
 
 #----------------------------------------------------------------------------
 # Group normalization.
@@ -1060,6 +1117,8 @@ class  VFMToyNet(torch.nn.Module):
                  out_ch=1, #number of channels in output of final conv layer
                  model_type = "ToyConvUNet", #class name for underlying model
                  M=1000, 
+                 depth_encoder = 2, # number of hidden layers for MLP encoder 
+                 width_encoder = 10, # with of hidden layers for MLP encoder 
                  ):
         super().__init__()
         self.model_type = model_type
@@ -1073,6 +1132,18 @@ class  VFMToyNet(torch.nn.Module):
         else:
             self.unet_model = globals()[model_type](dim=data_dim, time_varying=True)
             self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True)
+        
+        #create encoder net 
+        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
+                                              num_hidden=depth_encoder, hidden_size=width_encoder) #for now,, do NO compression
+    
+    def get_x0s(self, x1):
+        """
+        Samples a pt x0 in latent space, given its dynamics 
+        equivalent in data space.
+        """
+        x0 = self.encoder.rsample(x1)
+        return x0
         
     def forward(self, x0_tau, xt_tau, taus): 
         cnoise = (self.M-1)*taus if self.model_type=="ToyConvUNet" else taus
