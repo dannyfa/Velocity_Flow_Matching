@@ -122,11 +122,11 @@ class VFMToyLoss:
         net_jac = torch.autograd.functional.jacobian(net, (x0_tau, xt_tau, taus))
         
         #get \nabla u 
-        nabla_u = torch.sum(net_jac[0][0], dim=0).transpose(1,0) #bs, d, d
+        nabla_u = torch.sum(net_jac[0][0], dim=2).transpose(2,1) #bs, d, d
         
         #get \nabla v, \partial_tau v 
-        nabla_v = torch.sum(net_jac[1][1], dim=0).transpose(1,0) #bs, d, d
-        partial_tau_v = torch.sum(net_jac[1][2], dim=0).T #bs, d
+        nabla_v = torch.sum(net_jac[1][1], dim=2).transpose(2,1) #bs, d, d
+        partial_tau_v = torch.sum(net_jac[1][2], dim=2) #bs, d
         
         
         # calc whole Lie derivative 
