@@ -215,6 +215,7 @@ def training_loop(
             writer.add_scalar('flow_train_loss', tot_separate_losses[0].item(), gs)
             writer.add_scalar('dyn_train_loss', tot_separate_losses[1].item(), gs)
             writer.add_scalar('lie_derivative_loss', tot_separate_losses[2].item(), gs)
+            writer.add_scalar('Kimgs', cur_nimg/1000, gs)
             gs+=1
 
         # Perform maintenance tasks once per tick.
