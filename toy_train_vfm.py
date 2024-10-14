@@ -99,7 +99,7 @@ def main(**kwargs):
     c = dnnlib.EasyDict()
     
     #setup dset args
-    proj_specs = dnnlib.EasyDict(project_to=opts.project_to, proj_type=opts.proj_type, temp=opts.project_temp) if opts.project else None
+    proj_specs = dnnlib.EasyDict(project_to=opts.project_to, proj_type=opts.project_type, temp=opts.project_temp) if opts.project else None
     c.dataset_kwargs = dnnlib.EasyDict(dset_name = opts.data_name, n_trajs=opts.n_trajs, T=opts.end_t, \
                                        dt=opts.dt, sigma=opts.sigma_dset, project=opts.project, proj_specs=proj_specs)
         

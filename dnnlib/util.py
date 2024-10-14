@@ -474,7 +474,7 @@ class projection():
 
             assert self.temp >0, print("Temperature should be a positive number")
             self.projection = lambda x: _swish(x @ self.W,temp=self.temp)
-        elif projType == 'double swish':
+        elif projType == 'double_swish':
 
             assert self.temp >0, print("Temperature should be a positive number")
             self.projection = lambda x: _double_swish(x @ self.W,temp=self.temp)
