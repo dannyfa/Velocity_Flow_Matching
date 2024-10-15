@@ -460,7 +460,7 @@ class ToyMLP(torch.nn.Module):
 @persistence.persistent_class
 class LatentVAE(torch.nn.Module):
     
-    def __init__(self,input_size,output_size,num_hidden,hidden_size=10):
+    def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5):
 
         super().__init__()
 
@@ -483,12 +483,17 @@ class LatentVAE(torch.nn.Module):
         self.mu = torch.nn.Sequential(*mu)
         self.u = torch.nn.Sequential(*u)
         self.d = torch.nn.Sequential(*d)
-    
+        
+        d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) #forcing a std Normal on pds
+        d_max_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps  #forcing some small vars for cds 
+        self.d_max = torch.cat([d_max_pds, d_max_cds], dim=-1)
+        
     def encode(self, x):
         mu,u,d = self.mu(x),self.u(x),self.d(x)
         u = u.unsqueeze(-1)
         d = torch.exp(d)
-        return mu, u, d 
+        clamped_d = torch.clamp(d, max=self.d_max.to(x.device))
+        return mu, u, clamped_d
     
     def rsample(self, x):
         mu,u,d = self.encode(x)
@@ -1120,6 +1125,7 @@ class  VFMToyNet(torch.nn.Module):
                  M=1000, 
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
                  width_encoder = 10, # with of hidden layers for MLP encoder 
+                 cd_eps = 1e-5 #max variance allowed for compressed dimensions in encoder output. 
                  ):
         super().__init__()
         self.data_dim = data_dim
@@ -1137,8 +1143,9 @@ class  VFMToyNet(torch.nn.Module):
             self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True)
         
         #create encoder net 
-        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=dims_to_keep, \
-                                              num_hidden=depth_encoder, hidden_size=width_encoder) #for now,, do NO compression
+        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
+                                              dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
+                                                  hidden_size=width_encoder, eps=cd_eps) #for now,, do NO compression
     
     def get_x0s(self, x1):
         """

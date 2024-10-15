@@ -116,7 +116,7 @@ def main(**kwargs):
     
     #setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
-                                        sigma=opts.sigma_fm, cd_eps=opts.eps, class_name='training.loss.VFMToyLoss')
+                                        sigma=opts.sigma_fm, class_name='training.loss.VFMToyLoss')
     
     #setup net kwargs 
     if opts.arch == "ToyConvUNet": 
@@ -130,7 +130,7 @@ def main(**kwargs):
     else:
         raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
     
-    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width)
+    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps)
         
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
