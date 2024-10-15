@@ -116,14 +116,16 @@ def main(**kwargs):
     
     #setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
-                                        sigma=opts.sigma_fm, class_name='training.loss.VFMToyLoss')
+                                        sigma=opts.sigma_fm, cd_eps=opts.eps, class_name='training.loss.VFMToyLoss')
     
     #setup net kwargs 
     if opts.arch == "ToyConvUNet": 
         c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], fc_embed_dim=2, conv_embed_dim=256, \
-                                               data_dim=working_data_dim, out_ch=1, class_name='training.networks.VFMToyNet') 
+                                               data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
+                                                   out_ch=1, class_name='training.networks.VFMToyNet') 
     elif opts.arch=='ToyMLP': 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, class_name='training.networks.VFMToyNet')
+        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
+                                           class_name='training.networks.VFMToyNet')
 
     else:
         raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 

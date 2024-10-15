@@ -13,6 +13,7 @@ and inflationary flow loss fns (for toy and image data).
 import torch
 from torch_utils import persistence
 from torch_cfm import conditional_flow_matching as cfm
+import numpy as np 
 
 
 #####################################################################
@@ -97,7 +98,8 @@ class EDMLoss:
 class VFMToyLoss:
     def __init__(self,
                  flow_matcher_type='exactot', 
-                 sigma=0.1):
+                 sigma=0.1, 
+                 cd_eps=1e-7):
         
         #get flow matcher for u 
         assert flow_matcher_type in ['exactot', 'regular']
@@ -115,6 +117,8 @@ class VFMToyLoss:
         #get flow matcher for v 
         #this is always just regular flow matcher! 
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma)
+        
+        self.eps = cd_eps
     
     def calc_lie_derivative(self, net, x0_tau, xt_tau, taus, u, v):
         #get Jacobian for all net outputs w.r.t. inputs! 
@@ -142,16 +146,30 @@ class VFMToyLoss:
         #get x0_0, xdt_0
         x0_0 = net.module.get_x0s(x0_1)
         xdt_0 = net.module.get_x0s(xdt_1)
+        
+        if net.module.dims_to_keep < net.module.data_dim:
+            #this is a PRR case! 
+            #sample last dim 
+            x0_0_cd_sample = torch.randn(x0_1.shape[0], (net.module.data_dim - net.module.dims_to_keep)).to(x0_1.device) * np.sqrt(self.eps)
+            xdt_0_cd_sample = torch.randn(xdt_1.shape[0], (net.module.data_dim - net.module.dims_to_keep)).to(xdt_1.device) * np.sqrt(self.eps)
+            x0_0_fullsample = torch.cat([x0_0, x0_0_cd_sample], dim=-1)
+            xdt_0_fullsample = torch.cat([xdt_0, xdt_0_cd_sample], dim=-1)
+            
+        else:
+            #prp case
+            #ok to keep encoder outputs as is 
+            x0_0_fullsample = x0_0
+            xdt_0_fullsample = xdt_0 
        
         #sample taus
-        taus = torch.rand(x0_0.shape[0], device=x0_0.device) # \tau \sim U[0,1]
+        taus = torch.rand(x0_0_fullsample.shape[0], device=x0_0_fullsample.device) # \tau \sim U[0,1]
         #sample ts 
-        ts = torch.rand(xdt_0.shape[0], device=xdt_0.device) * dt #\t \sim U[0, dt]
+        ts = torch.rand(xdt_0_fullsample.shape[0], device=xdt_0_fullsample.device) * dt #\t \sim U[0, dt]
         
         
         #get x0_tau, u0_tau
-        _, x0_tau, u0_tau = self.tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
-        _, xdt_tau, _ = self.tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+        _, x0_tau, u0_tau = self.tau_flowmatcher.sample_location_and_conditional_flow(x0_0_fullsample, x0_1, t=taus)
+        _, xdt_tau, _ = self.tau_flowmatcher.sample_location_and_conditional_flow(xdt_0_fullsample, xdt_1, t=taus)
         
         
         #get xt_tau, ut_tau 

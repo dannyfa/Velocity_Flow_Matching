@@ -1113,7 +1113,8 @@ class  VFMToyNet(torch.nn.Module):
                  channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
                  fc_embed_dim = 2,  # Dimensionality for Gaussian random feature embeddings for fc layers 
                  conv_embed_dim = 256,  # Dimensionality for Gaussian random feature embeddings for conv layers
-                 data_dim=2, #dimensionality of dat we will feed through Net 
+                 data_dim=2, #dimensionality of data we will feed through Net 
+                 dims_to_keep = 2, #number of nominal dimensions encoder should preserve 
                  out_ch=1, #number of channels in output of final conv layer
                  model_type = "ToyConvUNet", #class name for underlying model
                  M=1000, 
@@ -1121,6 +1122,8 @@ class  VFMToyNet(torch.nn.Module):
                  width_encoder = 10, # with of hidden layers for MLP encoder 
                  ):
         super().__init__()
+        self.data_dim = data_dim
+        self.dims_to_keep = dims_to_keep
         self.model_type = model_type
         self.M = M 
         assert model_type in ["ToyConvUNet", "ToyMLP"]
@@ -1134,7 +1137,7 @@ class  VFMToyNet(torch.nn.Module):
             self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True)
         
         #create encoder net 
-        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
+        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=dims_to_keep, \
                                               num_hidden=depth_encoder, hidden_size=width_encoder) #for now,, do NO compression
     
     def get_x0s(self, x1):
