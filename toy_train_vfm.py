@@ -43,6 +43,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
 @click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
 @click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
+@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
+@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                          type=int, default=64, show_default=True)
 
 
 # Hyperparameters.
@@ -130,7 +132,8 @@ def main(**kwargs):
     else:
         raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
     
-    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps)
+    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps, \
+                            depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width)
         
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)

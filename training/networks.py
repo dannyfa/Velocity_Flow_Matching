@@ -436,20 +436,19 @@ class ToySongUNet(torch.nn.Module):
 
 @persistence.persistent_class
 class ToyMLP(torch.nn.Module):
-    def __init__(self, dim, out_dim=None, w=64, time_varying=False):
+    def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False):
         super().__init__()
+        
         self.time_varying = time_varying
         if out_dim is None:
             out_dim = dim
-        self.net = torch.nn.Sequential(
-            torch.nn.Linear(dim + (1 if time_varying else 0), w),
-            torch.nn.SELU(),
-            torch.nn.Linear(w, w),
-            torch.nn.SELU(),
-            torch.nn.Linear(w, w),
-            torch.nn.SELU(),
-            torch.nn.Linear(w, out_dim),
-        )
+        
+        net = [torch.nn.Linear(dim + (1 if time_varying else 0), w), torch.nn.SELU()]
+        for _ in range(n_hidden):
+            net.append(torch.nn.Linear(w, w))
+            net.append(torch.nn.SELU())
+        net.append(torch.nn.Linear(w, out_dim))
+        self.net = torch.nn.Sequential(*net)
 
     def forward(self, x, t):
         return self.net(torch.cat([x, t[:, None]], dim=-1))
@@ -1128,7 +1127,9 @@ class  VFMToyNet(torch.nn.Module):
                  model_type = "ToyConvUNet", #class name for underlying model
                  M=1000, 
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
-                 width_encoder = 10, # with of hidden layers for MLP encoder 
+                 width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
+                 depth_mlp = 2,  # number of hidden layers for MLPs used for flow and dyn nets
+                 width_mlp = 64, # number of hidden units (for each layer) of MLPs used in flow/dynamics nets.
                  cd_eps = 1e-5 #max variance allowed for compressed dimensions in encoder output. 
                  ):
         super().__init__()
@@ -1143,8 +1144,8 @@ class  VFMToyNet(torch.nn.Module):
             self.vnet_model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
                                                conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
         else:
-            self.unet_model = globals()[model_type](dim=data_dim, time_varying=True)
-            self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True)
+            self.unet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+            self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create encoder net 
         self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
