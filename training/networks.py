@@ -465,6 +465,7 @@ class LatentVAE(torch.nn.Module):
 
         mu = [torch.nn.Linear(input_size,hidden_size,bias=True), torch.nn.ReLU()]
         u = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
+        d = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
 
         
         for _ in range(num_hidden):
@@ -472,19 +473,26 @@ class LatentVAE(torch.nn.Module):
             mu.append(torch.nn.ReLU())
             u.append(torch.nn.Linear(hidden_size,hidden_size))
             u.append(torch.nn.ReLU())
+            d.append(torch.nn.Linear(hidden_size,hidden_size))
+            d.append(torch.nn.ReLU())
             
         mu.append(torch.nn.Linear(hidden_size,output_size))
         u.append(torch.nn.Linear(hidden_size,output_size))
+        d.append(torch.nn.Linear(hidden_size,output_size))
 
         self.mu = torch.nn.Sequential(*mu)
         self.u = torch.nn.Sequential(*u)
+        self.d = torch.nn.Sequential(*d)
         
-        d_pds = torch.ones(dims_to_keep).unsqueeze(0) #forcing a std Normal on pds
-        d_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps  #forcing some small vars for cds 
-        self.d_diag = torch.cat([d_pds, d_cds], dim=-1) #1, dim
+        if dims_to_keep < output_size: 
+            d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+            d_max_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps 
+            self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim
+        else: 
+            self.d_max_diag = torch.ones(output_size).unsqueeze(0) #1, dim 
         
     def encode(self, x):
-        mu,u = self.mu(x),self.u(x) 
+        mu,u, d = self.mu(x),self.u(x),self.d(x)
         u = u.unsqueeze(-1) #bs,dim,1
         L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1)) #bs, dim, dim 
         L = torch.tril(L) #force L to be lower triangular (bs, dim, dim)
@@ -493,8 +501,10 @@ class LatentVAE(torch.nn.Module):
         L_diag_ones = torch.ones(L_diag.shape).to(x.device) #bs, dim
         L -= torch.diag_embed(L_diag) #remove original diagonal 
         L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
-        #now get D 
-        D = torch.diag_embed(self.d_diag.repeat(x.shape[0], 1)).to(x.device) #bs, dim, dim 
+        #now setup D
+        d = torch.exp(d) #d has to be pos
+        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
+        D = torch.diag_embed(d) #bs,dim,dim
         L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
         return mu, L_tril 
     
