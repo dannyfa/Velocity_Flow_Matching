@@ -466,45 +466,49 @@ class LatentVAE(torch.nn.Module):
 
         mu = [torch.nn.Linear(input_size,hidden_size,bias=True), torch.nn.ReLU()]
         u = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
-        d = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
+
         
         for _ in range(num_hidden):
             mu.append(torch.nn.Linear(hidden_size,hidden_size))
             mu.append(torch.nn.ReLU())
             u.append(torch.nn.Linear(hidden_size,hidden_size))
             u.append(torch.nn.ReLU())
-            d.append(torch.nn.Linear(hidden_size,hidden_size))
-            d.append(torch.nn.ReLU())
             
         mu.append(torch.nn.Linear(hidden_size,output_size))
         u.append(torch.nn.Linear(hidden_size,output_size))
-        d.append(torch.nn.Linear(hidden_size,output_size))
 
         self.mu = torch.nn.Sequential(*mu)
         self.u = torch.nn.Sequential(*u)
-        self.d = torch.nn.Sequential(*d)
         
-        d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) #forcing a std Normal on pds
-        d_max_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps  #forcing some small vars for cds 
-        self.d_max = torch.cat([d_max_pds, d_max_cds], dim=-1)
+        d_pds = torch.ones(dims_to_keep).unsqueeze(0) #forcing a std Normal on pds
+        d_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps  #forcing some small vars for cds 
+        self.d_diag = torch.cat([d_pds, d_cds], dim=-1) #1, dim
         
     def encode(self, x):
-        mu,u,d = self.mu(x),self.u(x),self.d(x)
-        u = u.unsqueeze(-1)
-        d = torch.exp(d)
-        clamped_d = torch.clamp(d, max=self.d_max.to(x.device))
-        return mu, u, clamped_d
+        mu,u = self.mu(x),self.u(x) 
+        u = u.unsqueeze(-1) #bs,dim,1
+        L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1)) #bs, dim, dim 
+        L = torch.tril(L) #force L to be lower triangular (bs, dim, dim)
+        #now force diagonals of L to be == 1 
+        L_diag = torch.diagonal(L, dim1=-2, dim2=-1) #bs, dim
+        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #bs, dim
+        L -= torch.diag_embed(L_diag) #remove original diagonal 
+        L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+        #now get D 
+        D = torch.diag_embed(self.d_diag.repeat(x.shape[0], 1)).to(x.device) #bs, dim, dim 
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
+        return mu, L_tril 
     
     def rsample(self, x):
-        mu,u,d = self.encode(x)
-        latent_dist = D.LowRankMultivariateNormal(mu, u, d)
+        mu, L_tril = self.encode(x)
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         return z 
         
     def forward(self,x):
         
-        mu,u,d = self.encode(x)
-        latent_dist = D.LowRankMultivariateNormal(mu, u, d)
+        mu, L_tril = self.encode(x)
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         #print(z.shape)
         #print(latent_dist.entropy().shape)
@@ -1145,7 +1149,7 @@ class  VFMToyNet(torch.nn.Module):
         #create encoder net 
         self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
-                                                  hidden_size=width_encoder, eps=cd_eps) #for now,, do NO compression
+                                                  hidden_size=width_encoder, eps=cd_eps) 
     
     def get_x0s(self, x1):
         """
