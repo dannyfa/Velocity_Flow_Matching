@@ -33,7 +33,7 @@ from scipy.ndimage import gaussian_filter
 
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
-
+from torchdyn.core import NeuralODE
 
 #------------------------------------------------------------------------------------------#
 # Utils for VFM
@@ -609,6 +609,50 @@ def get_eigenvals_basis(X, n_comp=784):
     U = pca.components_ #eigenvectors are rows of U 
     return eigenvals, pca, U.T #eigenvectors returned as cols of U
 
+
+#------------------------------------------------------------------------------#
+# methods to run trajectory simulation
+#------------------------------------------------------------------------------#
+
+class dyn_torch_wrapper(torch.nn.Module):
+    """
+    Wraps model to torchdyn compatible format.
+    
+    Note that, for now, t==1 ALWAYS. 
+    This simulates dynamics in IS only!
+    
+    """
+
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
+
+    def forward(self, t, x, *args, **kwargs):
+        net_ts = torch.ones(x.shape[0]).type(torch.float32).to(x.device)
+        out = self.model(x, net_ts)        
+        return out
+
+
+def calc_dyn_trajectories(model, init_samples, nt=100):
+    """
+    Simulates dyn net trajectories.
+    
+    Args
+    -----
+    model: torch.nn.Module. Instance of IFsCFMToyNet class. 
+    init_samples: torch.Tensor. Contains starting points for ODE int.
+    nt: int. Number of time pts to integrate over. This is per each 
+    dt step in dyn trajectory.
+    """
+    #setup node 
+    node = NeuralODE(dyn_torch_wrapper(model), solver='dopri5', \
+                     sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+    #get ts 
+    ts = torch.linspace(0.0, 1.0, nt).to(init_samples.device)
+    #now sim ODE 
+    with torch.no_grad():
+        traj = node.trajectory(init_samples, ts)
+    return traj
 
 #------------------------------------------------------------------------------#
 
