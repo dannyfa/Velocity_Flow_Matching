@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Script to simulate full trajectories at 
-specified (fixed) tau values.
+Script to simulate integrate flow and dynamics networks 
+in alternating fashion, s.t. we simulate dynamics for some pts
+and then move some in tau (flow dimension) before simulating more dynamics...
+
+Idea here is to move slower in flow time than in dynamics time, s.t. we can 
+have a sense for how dynamics changes as we change flow/flow time.
 """
 
 #general dependencies 
@@ -17,19 +21,6 @@ import json
 import dnnlib
 from torch_utils import distributed as dist
 
-
-#----------------------------------------------------------------------------
-# Parse a comma separated list of floats and return a list of floats.
-# Example: '0.0, 0.25, 0.50' returns [0.0,0.25,0.50]
-
-def parse_float_list(s):
-    if isinstance(s, list): return s
-    ranges = []
-    for p in s.split(','):
-        ranges.append(float(p))
-    return ranges
-
-#----------------------------------------------------------------------------
 
 @click.command()
 
@@ -48,13 +39,12 @@ def parse_float_list(s):
 @click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
 @click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                type=float, default=1.2, show_default=True)
 @click.option('--device',                  help='Name of device to use', metavar='STR',                                                                    type=str, default='cuda:0', show_default=True)
-@click.option('--traj_len',                help='Number of points to simulate per trajectory.', metavar='INT',                                             type=int, default=1000, show_default=True)
-@click.option('--taus',                    help='Tau values to simulate full trajs for  [default: varies]', metavar='LIST',                                type=parse_float_list)
-
+@click.option('--tps_per_tau',             help='Number of t steps to take per tau', metavar='INT',                                                        type=int, default=200, show_default=True)
+@click.option('--num_taus',                help='Number of linearly space taus to simulate dynamics for', metavar='INT',                                   type=int, default=5, show_default=True)
 
 def main(**kwargs):
     """
-    Runs actual trajectory simulations....
+    Runs actual alternating flow/dynamics integration.
     """
     
     #get dict with our args 
@@ -71,7 +61,7 @@ def main(**kwargs):
     working_data_dim = opts.project_to if opts.project else opts.data_dim
     
     #set up save dir and output fname
-    out_dir = os.path.join(opts.outdir, 'dynamics_traj_net_sims')
+    out_dir = os.path.join(opts.outdir, 'alternating_flow_dyn_traj_sims')
     if dist.get_rank() == 0:
         os.makedirs(out_dir, exist_ok=True)    
     
@@ -100,37 +90,41 @@ def main(**kwargs):
     _, dset_samples = dnnlib.util.get_toy_dynamicdset(opts.data_name, opts.n_trajs, opts.end_t, opts.dt, opts.sigma_dset, project=opts.project, proj_specs=proj_specs)
     data = np.array(dset_samples) #n_trajs, traj_len, dims
     
+    #init curr_tau_pts
     starting_pts = torch.from_numpy(data[:, 0, :]).unsqueeze(1).type(torch.float32).to(device) #ntrajs,1,dim
+    curr_tau_pts = starting_pts
     
-    #for each tau, 
-    #pass initial data pts to desired flow time
-    #take these and simulate full dynamics trajectories
-    for tau in opts.taus: 
+    #setup init_tau to 1.0 --> always take starting pts from DS
+    init_tau=1.0 
+    
+    #get taus to sim partial trajs for
+    taus_to_sim = np.linspace(0, 1.0, opts.num_taus) 
+    
+    for tau in taus_to_sim: 
+        dist.print0('*'*40) 
+        dist.print0(f'Processing traj for tau:{tau}') 
         dist.print0('*'*40)
-        dist.print0(f'Simulating dynamics for {tau} tau')
-        dist.print0('*'*40)
-        curr_tau_trajs = []
-        if tau != 1.0:
-            #use flow net to map starting pts from DS (tau==1.0) to desired tau
-            curr_tau_starting_pts = dnnlib.util.calc_flow_trajectories(flow_net, starting_pts.squeeze(1), 1.0, tau)
-            #init curr_tau_pts
-            curr_tau_pts = curr_tau_starting_pts[-1].unsqueeze(1) 
-        else: 
-            curr_tau_pts =  starting_pts
-        curr_tau_trajs.append(curr_tau_pts.cpu().numpy())
-        for i in range(opts.traj_len):
-            dist.print0('*'*40)
-            dist.print0(f'Processing step: {i}')
+        curr_tau_traj = []
+        #sim flow up to desired tau
+        curr_tau_pts = dnnlib.util.calc_flow_trajectories(flow_net, curr_tau_pts.squeeze(1), init_tau, tau)
+        curr_tau_pts = curr_tau_pts[-1].unsqueeze(1) #ntrajsx1xdim in curr tau space 
+        curr_tau_traj.append(curr_tau_pts.cpu().numpy())
+        #sim dyn for some steps, at this tau... 
+        for s in range(opts.tps_per_tau): 
+            dist.print0('*'*40) 
+            dist.print0(f'Processing step:{s}') 
             dist.print0('*'*40)
             curr_tau_pts = dnnlib.util.calc_dyn_trajectories(dyn_net, curr_tau_pts.squeeze(1), tau)
             curr_tau_pts = curr_tau_pts[-1].unsqueeze(1)
-            curr_tau_trajs.append(curr_tau_pts.cpu().numpy())
-        curr_tau_trajs = np.concatenate(curr_tau_trajs, axis=1) #n_trajs, traj_len+1, dim
-        #save this out...
+            curr_tau_traj.append(curr_tau_pts.cpu().numpy())
+        curr_tau_traj = np.concatenate(curr_tau_traj, axis=1)
+        #save steps for curr_tau 
         if dist.get_rank() ==0:
-            curr_tau_out_fname = out_fname_root + f'_{tau}tau.npz'
-            np.savez(os.path.join(out_dir, curr_tau_out_fname), trajs=curr_tau_trajs)
-    
+            curr_tau_out_fname = out_fname_root + f'_{tau}tau_{opts.tps_per_tau}timepts.npz'
+            np.savez(os.path.join(out_dir, curr_tau_out_fname), trajs=curr_tau_traj) 
+        #update starting tau ... 
+        init_tau = tau 
+
     #now save sim options...
     if dist.get_rank() ==0:
         with open(os.path.join(out_dir, 'sim_options.json'), 'wt') as f:
@@ -142,7 +136,3 @@ if __name__ == "__main__":
     main()
 
 #----------------------------------------------------------------------------
-    
-    
-    
-    

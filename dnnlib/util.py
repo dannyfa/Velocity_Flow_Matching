@@ -614,38 +614,84 @@ def get_eigenvals_basis(X, n_comp=784):
 # methods to run trajectory simulation
 #------------------------------------------------------------------------------#
 
-class dyn_torch_wrapper(torch.nn.Module):
+#for flow net 
+
+class flow_torch_wrapper(torch.nn.Module):
     """
     Wraps model to torchdyn compatible format.
     
-    Note that, for now, t==1 ALWAYS. 
-    This simulates dynamics in IS only!
+    This is for flow net mapping between DS and LS.
     
     """
-
     def __init__(self, model):
         super().__init__()
         self.model = model
 
     def forward(self, t, x, *args, **kwargs):
-        net_ts = torch.ones(x.shape[0]).type(torch.float32).to(x.device)
-        out = self.model(x, net_ts)        
+        t = t.repeat(x.shape[0]) #bs 
+        out = self.model(x, t)        
         return out
 
-
-def calc_dyn_trajectories(model, init_samples, nt=100):
+def calc_flow_trajectories(model, init_samples, start_tau, end_tau, nt=100):
     """
-    Simulates dyn net trajectories.
+    Computes ODE trajectories for plotting/checking
+    model during training.
     
     Args
     -----
     model: torch.nn.Module. Instance of IFsCFMToyNet class. 
-    init_samples: torch.Tensor. Contains starting points for ODE int.
-    nt: int. Number of time pts to integrate over. This is per each 
-    dt step in dyn trajectory.
+    dset_kwargs: dict. Contains original args for data specification.
+    loss_fn: instance of IFsCFMToyLoss class. 
+    n:int. Number of samples to simulate.
+    nt: number of time pts to use for trajectory integration.
+    device: instance of torch.device.
     """
     #setup node 
-    node = NeuralODE(dyn_torch_wrapper(model), solver='dopri5', \
+    node = NeuralODE(flow_torch_wrapper(model), solver='dopri5', \
+                     sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+    #get ts 
+    ts = torch.linspace(start_tau, end_tau, nt).to(init_samples.device)
+    #now sim ODE 
+    with torch.no_grad():
+        traj = node.trajectory(init_samples, ts)
+    return traj
+
+
+#for dynamics net 
+
+class dyn_torch_wrapper(torch.nn.Module):
+    """
+    Wraps model to torchdyn compatible format.
+    
+    Note that this allows to call dynamics net
+    at different taus.
+    
+    """
+
+    def __init__(self, model, tau):
+        super().__init__()
+        self.model = model
+        self.tau = tau 
+
+    def forward(self, t, x, *args, **kwargs):
+        net_taus = torch.ones(x.shape[0]).type(torch.float32).to(x.device)*self.tau
+        out = self.model(x, net_taus)        
+        return out
+
+
+def calc_dyn_trajectories(model, init_samples, tau, nt=100):
+    """
+    Computes dynamics net trajectories for a given set of initial
+    samples and tau.
+    
+    Args
+    -----
+    model: torch.nn.Module. Instance of a trained dynamics net.
+    init_samples: torch.Tensor. [bs, d]
+    tau: float. Flow time we wish to simulate corresponding dynamics.
+    """
+    #setup node 
+    node = NeuralODE(dyn_torch_wrapper(model, tau), solver='dopri5', \
                      sensitivity="adjoint", atol=1e-4, rtol=1e-4)
     #get ts 
     ts = torch.linspace(0.0, 1.0, nt).to(init_samples.device)
