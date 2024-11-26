@@ -186,6 +186,7 @@ class DoubleCircles(ToyData):
         xy2 = newX + dw_xy
         
         return xy2 - x
+    
 
 #Lorenz attractor - 3D ODE sys 
 class Lorenz63(ToyData):
@@ -321,6 +322,63 @@ class DoubleSDE(ToyData):
             xx2 = self._polar_to_cartesian(r,theta) + self.center2
 
         return xx2 + self.g(x,t,sigma)@self.dW(dt) - x
+    
+#Alternative double SDE 
+class DoubleSDEOrbit(ToyData):
+
+    def __init__(self,coeffs=[1.65*np.pi,np.array([-8,0]),np.array([8,0])],mass=7000,seed=1234):
+
+        super(DoubleSDEOrbit,self).__init__()
+        self.omega,self.center1,self.center2 = coeffs
+        self.mass=mass
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        r1,theta1 = self._cartesian_to_polar(self.center1-x)
+        r2,theta2 = self._cartesian_to_polar(self.center2-x)
+        F1 = self.mass/r1**3
+        F2 = self.mass/r2**3
+        return F1 * (self.center1- x) + F2 * (self.center2-x)
+
+    def g(self,x,t,sigma):
+        return sigma * np.eye(2)#/(np.abs(x[0])+1/10)
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=np.eye(2)*dt)
+    
+    def _polar_to_cartesian(self,r,theta):
+    
+        return np.hstack([r*np.cos(theta),r*np.sin(theta)])
+    
+    def _cartesian_to_polar(self,xy):
+    
+        r = np.linalg.norm(xy)
+        theta = np.arctan2(xy[1],xy[0])
+        return r,theta
+
+    def init_conditions(self):
+
+        init_xy = self.gen.multivariate_normal(mean=[0,0],cov=np.array([[0,0],[0,2]]))
+        if init_xy[0] < 0:
+            r1,theta1 = self._cartesian_to_polar(init_xy - self.center1)
+            omega = self.omega
+        else:
+            r1,theta1 = self._cartesian_to_polar(init_xy - self.center2)
+            omega = -self.omega
+        self.vel = np.array([-omega*r1 *np.sin(theta1), omega*r1*np.cos(theta1)])
+
+        
+        return init_xy
+
+    def dx(self,x,t,dt,sigma):
+
+        
+        dv = self.f(x,t)*dt
+        
+        dx = self.vel * dt
+        self.vel += dv
+        
+        return dx + self.g(x,t,sigma)@self.dW(dt)
 
 #Moving balls dataset (movie)
 class Balls(ToyData):
@@ -549,7 +607,8 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
             'rossler': "Rossler()", 
             'lorenz63': "Lorenz63()",
             'lorenz96': "Lorenz96()", 
-            'doublesde': "DoubleSDE()"}
+            'doublesde': "DoubleSDE()", 
+            'doublesdeorbit': "DoubleSDEOrbit()"}
     dset_name = dset_name.lower()
     try: 
         dset_gen_obj = eval(DATASETS[dset_name])
