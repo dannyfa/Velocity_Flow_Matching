@@ -49,27 +49,6 @@ class Linear(torch.nn.Module):
             x = x.add_(self.bias.to(x.dtype))
         return x
     
-#------------------------------------------------------------------------
-#Fc Layer that re-shapes outputs to match feature maps
-
-@persistence.persistent_class
-class Linear_FR(torch.nn.Module):
-    """A fully connected layer that reshapes outputs to feature maps."""
-    def __init__(self, input_dim, output_dim, bias=True, init_mode='kaiming_normal', \
-                init_weight=1, init_bias=0):
-        super().__init__()
-        self.input_dim=input_dim
-        self.output_dim=output_dim
-        init_kwargs = dict(mode=init_mode, fan_in=input_dim, fan_out=output_dim)
-        self.weight = torch.nn.Parameter(weight_init([output_dim, input_dim],\
-                                                     **init_kwargs) * init_weight)
-        self.bias = torch.nn.Parameter(weight_init([output_dim], \
-                                                   **init_kwargs) * init_bias) if bias else None        
-    def forward(self, x):
-        x = x @ self.weight.to(x.dtype).t()
-        if self.bias is not None:
-            x = x.add_(self.bias.to(x.dtype))        
-        return x[..., None, None]
 
 #----------------------------------------------------------------------------
 # Convolutional layer with optional up/downsampling.
@@ -121,316 +100,134 @@ class Conv2d(torch.nn.Module):
             x = x.add_(b.reshape(1, -1, 1, 1))
         return x
 
-#--------------------------------------------------------------------------#
-#ToyConvUnet Residual Block 
-
-@persistence.persistent_class
-class ToyResidualBlock(torch.nn.Module):
-    """
-    Down/Up-Sampling Res Blocks for ToyConvNet.
-    """
-    def __init__(self, in_ch, out_ch, kernel_size, stride, embed_dim, grpnorm_dim, \
-                bias=True, down=False, up=False, init_kwargs=dict()):
-        super().__init__()
-        self.conv1 = Conv2d(in_channels=in_ch, out_channels=out_ch, kernel=kernel_size, \
-                           stride=stride, bias=bias, down=down, up=up, **init_kwargs)
-        self.dense1 = Linear_FR(input_dim=embed_dim, output_dim=out_ch, \
-                                bias=bias, **init_kwargs)
-        self.gnorm1=torch.nn.GroupNorm(grpnorm_dim, num_channels=out_ch)
-        
-    def forward(self, x, embed):
-        out = self.conv1(x)
-        out += self.dense1(embed)
-        out = silu(self.gnorm1(out))
-        return out 
 
 #----------------------------------------------------------------------------#
-#Toy ConvUNet 
-#Uses EDM Layers/Init as much as possible 
-#This is main arch used for all toy data experiments! 
+
+@persistence.persistent_class
+class GaussianFourierProjection(torch.nn.Module):
+  """
+  Gaussian random features for encoding time steps.
+  This is similar to implementation from Karras.
+  """  
+  def __init__(self, embed_dim, scale=30.):
+    super().__init__()
+    # Randomly sample weights during initialization. These weights are fixed 
+    # during optimization and are not trainable.
+    self.W = torch.nn.Parameter(torch.randn(embed_dim // 2) * scale, requires_grad=False)
+  def forward(self, x):
+    x_proj = x[:, None] * self.W[None, :] * 2 * np.pi
+    return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)
+
+#----------------------------------------------------------------------------#
+
+@persistence.persistent_class
+class Dense(torch.nn.Module):
+  """
+  A fully connected layer that reshapes outputs to feature maps.
+  """
+  def __init__(self, input_dim, output_dim):
+    super().__init__()
+    self.dense = torch.nn.Linear(input_dim, output_dim)
+  def forward(self, x):
+    return self.dense(x)[..., None, None]
+
+#----------------------------------------------------------------------------#
 
 @persistence.persistent_class
 class ToyConvUNet(torch.nn.Module):
+  """A time-dependent model built upon U-Net architecture."""
+
+  def __init__(self, channels=[32, 64, 128, 256], embed_dim=256, img_size=28, img_ch=1):
     """
-    ConvUNet for toy data.
+    Initialize a time-dependent flow network.
+
+    Args:
+      channels: The number of channels for feature maps of each resolution.
+      embed_dim: The dimensionality of Gaussian random feature embeddings.
+      
     """
-    def __init__(self, channels=[32, 64, 128, 256], fc_embed_dim=2, conv_embed_dim=256, \
-                data_dim=2, out_ch=1):
-        super().__init__()
-        init = dict(init_mode='xavier_uniform')
-        init_zero= dict(init_mode='xavier_uniform', init_weight=1e-5)
-        
-        #c_noise mapping layers 
-        self.map_conv_noise = FourierEmbedding(num_channels=conv_embed_dim)
-        self.map_conv_layer0 = Linear(in_features=conv_embed_dim, out_features=conv_embed_dim, \
-                                **init)
-        self.map_fc_noise = FourierEmbedding(num_channels=fc_embed_dim)
-        self.map_fc_layer0 = Linear(in_features=fc_embed_dim, out_features=fc_embed_dim, \
-                                   **init)
-        
-        #up-sampling fc layers 
-        self.dense11 = Linear(in_features=data_dim, out_features=4, **init)
-        self.dense12 = Linear(in_features=fc_embed_dim, out_features=4, **init)
-        
-        self.dense21 = Linear(in_features=4, out_features=16, **init)
-        self.dense22 = Linear(in_features=fc_embed_dim, out_features=16, **init)
+    super().__init__()
+    #set up basic shapes for img
+    self.img_size=img_size
+    self.img_ch=img_ch
+    # Gaussian random feature embedding layer for time
+    self.embed = torch.nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim),
+         torch.nn.Linear(embed_dim, embed_dim))
+    # Encoding layers where the resolution decreases
+    self.conv1 = torch.nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
+    self.dense1 = Dense(embed_dim, channels[0])
+    self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+    self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
+    self.dense2 = Dense(embed_dim, channels[1])
+    self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
+    self.dense3 = Dense(embed_dim, channels[2])
+    self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+    self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
+    self.dense4 = Dense(embed_dim, channels[3])
+    self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3])    
 
-        self.dense31 = Linear(in_features=16, out_features=32, **init)
-        self.dense32 = Linear(in_features=fc_embed_dim, out_features=32, **init) 
-        
-        self.dense41 = Linear(in_features=32, out_features=64, **init)
-        self.dense42 = Linear(in_features=fc_embed_dim, out_features=64, **init)   
-        
-        #down-sampling fc layers 
-        self.dense51 = Linear(in_features=64, out_features=32, **init)
-        self.dense52 = Linear(in_features=fc_embed_dim, out_features=32, **init)  
+    # Decoding layers where the resolution increases
+    self.tconv4 = torch.nn.ConvTranspose2d(channels[3], channels[2], 3, stride=2, bias=False)
+    self.dense5 = Dense(embed_dim, channels[2])
+    self.tgnorm4 = torch.nn.GroupNorm(32, num_channels=channels[2])
+    self.tconv3 = torch.nn.ConvTranspose2d(channels[2] + channels[2], channels[1], 3, stride=2, bias=False, output_padding=1)    
+    self.dense6 = Dense(embed_dim, channels[1])
+    self.tgnorm3 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.tconv2 = torch.nn.ConvTranspose2d(channels[1] + channels[1], channels[0], 3, stride=2, bias=False, output_padding=1)    
+    self.dense7 = Dense(embed_dim, channels[0])
+    self.tgnorm2 = torch.nn.GroupNorm(32, num_channels=channels[0])
+    self.tconv1 = torch.nn.ConvTranspose2d(channels[0] + channels[0], 1, 3, stride=1)
+    
+    # The swish activation function
+    #self.act = lambda x: x * torch.sigmoid(x)
+  
+  def forward(self, x, t): 
+    # reshape flattened array 
+    x = x.reshape(-1, self.img_ch, self.img_size, self.img_size)
+    # Obtain the Gaussian random feature embedding for t   
+    embed = silu(self.embed(t))    
+    # Encoding path
+    h1 = self.conv1(x)    
+    ## Incorporate information from t
+    h1 += self.dense1(embed)
+    ## Group normalization
+    h1 = self.gnorm1(h1)
+    h1 = silu(h1)
+    h2 = self.conv2(h1)
+    h2 += self.dense2(embed)
+    h2 = self.gnorm2(h2)
+    h2 = silu(h2)
+    h3 = self.conv3(h2)
+    h3 += self.dense3(embed)
+    h3 = self.gnorm3(h3)
+    h3 = silu(h3)
+    h4 = self.conv4(h3)
+    h4 += self.dense4(embed)
+    h4 = self.gnorm4(h4)
+    h4 = silu(h4)
 
-        self.dense61 = Linear(in_features=32, out_features=16, **init)
-        self.dense62 = Linear(in_features=fc_embed_dim, out_features=16, **init)
-        
-        self.dense71 = Linear(in_features=16, out_features=4, **init)
-        self.dense72 = Linear(in_features=fc_embed_dim, out_features=4, **init)
-        
-        #init output layer to ~zero, as in Karras 
-        self.dense81 = Linear(in_features=4, out_features=data_dim, **init_zero)
-        
-        #res blocks
-        #down blocks 
-        self.downresblock1 = ToyResidualBlock(1, channels[0], 3, 1, conv_embed_dim, \
-                                          4, bias=True, down=True, init_kwargs=init)
-        self.downresblock2 = ToyResidualBlock(channels[0], channels[1], 3, 1, conv_embed_dim, \
-                                          32, bias=True, down=True, init_kwargs=init)
-        self.downresblock3 = ToyResidualBlock(channels[1], channels[2], 3, 1, conv_embed_dim, \
-                                          32, bias=True, down=True, init_kwargs=init)
-        self.downresblock4 = ToyResidualBlock(channels[2], channels[3], 3, 2, conv_embed_dim, \
-                                          32, bias=True, down=True, init_kwargs=init)
-        #up blocks
-        self.upresblock1 = ToyResidualBlock(channels[3], channels[2], 3, 3, conv_embed_dim, \
-                                        32, bias=True, up=True, init_kwargs=init)
-        self.upresblock2 = ToyResidualBlock(channels[2]+channels[2], channels[1], 3, 1, \
-                                         conv_embed_dim, 32, bias=True, up=True, init_kwargs=init)
-        self.upresblock3 = ToyResidualBlock(channels[1]+channels[1], channels[0], 3, 1, \
-                                        conv_embed_dim, 32, bias=True, up=True, init_kwargs=init)
-        self.upresblock4 = ToyResidualBlock(channels[0]+channels[0], out_ch, 3, 1, \
-                                        conv_embed_dim, 1, bias=True, up=True, init_kwargs=init)
-    def forward(self, x, t, class_labels=None, augment_labels=None):
-        #get fc_embed 
-        fc_embed = self.map_fc_noise(t)
-        #swap sin/cos (as in Karras)
-        fc_embed = fc_embed.reshape(fc_embed.shape[0], 2, -1).flip(1).reshape(*fc_embed.shape)
-        fc_embed = silu(self.map_fc_layer0(fc_embed))
-        
-        #get conv_embed
-        conv_embed = self.map_conv_noise(t)
-        conv_embed = conv_embed.reshape(conv_embed.shape[0], \
-                                        2, -1).flip(1).reshape(*conv_embed.shape) #swap sin/cos
-        conv_embed = silu(self.map_conv_layer0(conv_embed))
-        
-        #upsample data before feeding to conv layers
-        h1 = self.dense11(x)
-        h1 += self.dense12(fc_embed)
-        h1=silu(h1)
-        
-        h2=self.dense21(h1)
-        h2 += self.dense22(fc_embed)
-        h2=silu(h2)
-        
-        h3=self.dense31(h2)
-        h3+=self.dense32(fc_embed)
-        h3=silu(h3)
-        
-        h4=self.dense41(h3)
-        h4+= self.dense42(fc_embed)
-        h4=silu(h4)
-        
-        #feed to conv res blocks
-        h5 = self.downresblock1(h4.view(x.shape[0], 1, 8, 8), conv_embed)
-        h6 = self.downresblock2(h5, conv_embed)
-        h7 = self.downresblock3(h6, conv_embed)
-        h8 = self.downresblock4(h7, conv_embed)
-        h9 = self.upresblock1(h8, conv_embed)
-        h10 = self.upresblock2(torch.cat([h9, h7], dim=1), conv_embed)
-        h11 = self.upresblock3(torch.cat([h10, h6], dim=1), conv_embed)
-        h12 = self.upresblock4(torch.cat([h11, h5], dim=1), conv_embed)
-        
-        #downsample conv out to data_dim
-        h13=self.dense51(h12.view(x.shape[0], 64))
-        h13+= self.dense52(fc_embed)
-        
-        h14=self.dense61(h13)
-        h14+=self.dense62(fc_embed)
-        h14=silu(h14)
-        
-        h15=self.dense71(h14)
-        h15+=self.dense72(fc_embed)
-        h15=silu(h15)
-        
-        h16=self.dense81(h15)
-        return h16
+    # Decoding path
+    h = self.tconv4(h4)
+    ## Skip connection from the encoding path
+    h += self.dense5(embed)
+    h = self.tgnorm4(h)
+    h = silu(h)
+    h = self.tconv3(torch.cat([h, h3], dim=1))
+    h += self.dense6(embed)
+    h = self.tgnorm3(h)
+    h = silu(h)
+    h = self.tconv2(torch.cat([h, h2], dim=1))
+    h += self.dense7(embed)
+    h = self.tgnorm2(h)
+    h = silu(h)
+    h = self.tconv1(torch.cat([h, h1], dim=1))
 
-#---------------------------------------------------------------------------#
-# Adapting Karras SongUNet for toy data
-# This option is NOT used in any paper experiments
-# It works fine, but it larger than ToyConvUNet
+    #flatten output once again before returning 
+    h = h.reshape(-1, self.img_ch*self.img_size**2)
+      
+    return h
 
-@persistence.persistent_class
-class ToySongUNet(torch.nn.Module):
-    def __init__(self,
-        img_resolution,                     # Image resolution for ConvNet
-        data_dim,                           # Actual dimensionality of toy data inputs.
-        in_channels,                        # Number of color channels at input.
-        out_channels,                       # Number of color channels at output.
-        label_dim           = 0,            # Number of class labels, 0 = unconditional.
-        augment_dim         = 0,            # Augmentation label dimensionality, 0 = no augmentation.
-
-        model_channels      = 128,          # Base multiplier for the number of channels.
-        channel_mult        = [1,2,2,2],    # Per-resolution multipliers for the number of channels.
-        channel_mult_emb    = 4,            # Multiplier for the dimensionality of the embedding vector.
-        num_blocks          = 4,            # Number of residual blocks per resolution.
-        attn_resolutions    = [16],         # List of resolutions with self-attention.
-        dropout             = 0.10,         # Dropout probability of intermediate activations.
-        label_dropout       = 0,            # Dropout probability of class labels for classifier-free guidance.
-
-        embedding_type      = 'positional', # Timestep embedding type: 'positional' for DDPM++, 'fourier' for NCSN++.
-        channel_mult_noise  = 1,            # Timestep embedding size: 1 for DDPM++, 2 for NCSN++.
-        encoder_type        = 'standard',   # Encoder architecture: 'standard' for DDPM++, 'residual' for NCSN++.
-        decoder_type        = 'standard',   # Decoder architecture: 'standard' for both DDPM++ and NCSN++.
-        resample_filter     = [1,1],        # Resampling filter: [1,1] for DDPM++, [1,3,3,1] for NCSN++.
-    ):
-        assert embedding_type in ['fourier', 'positional']
-        assert encoder_type in ['standard', 'skip', 'residual']
-        assert decoder_type in ['standard', 'skip']
-
-        super().__init__()
-        self.label_dropout = label_dropout
-        self.in_ch = in_channels
-        self.img_res = img_resolution
-        emb_channels = model_channels * channel_mult_emb
-        noise_channels = model_channels * channel_mult_noise
-        init = dict(init_mode='xavier_uniform')
-        init_zero = dict(init_mode='xavier_uniform', init_weight=1e-5)
-        init_attn = dict(init_mode='xavier_uniform', init_weight=np.sqrt(0.2))
-        block_kwargs = dict(
-            emb_channels=emb_channels, num_heads=1, dropout=dropout, skip_scale=np.sqrt(0.5), eps=1e-6,
-            resample_filter=resample_filter, resample_proj=True, adaptive_scale=False,
-            init=init, init_zero=init_zero, init_attn=init_attn,
-        )
-
-        # Noise Mapping.
-        self.map_noise = PositionalEmbedding(num_channels=noise_channels, endpoint=True) if embedding_type == 'positional' else FourierEmbedding(num_channels=noise_channels)
-        self.map_label = Linear(in_features=label_dim, out_features=noise_channels, **init) if label_dim else None
-        self.map_augment = Linear(in_features=augment_dim, out_features=noise_channels, bias=False, **init) if augment_dim else None
-        self.map_layer0 = Linear(in_features=noise_channels, out_features=emb_channels, **init)
-        self.map_layer1 = Linear(in_features=emb_channels, out_features=emb_channels, **init)
-        
-        # Up/DownSampling FC Layers
-        fc_midres = int((in_channels*img_resolution**2)/2)
-        fc_upres = int(in_channels*img_resolution**2)
-        
-        self.fc1 = Linear(in_features=data_dim, out_features=fc_midres, **init)
-        self.fc2 = Linear(in_features=fc_midres, out_features=fc_upres, **init)
-        
-        self.fc3 = Linear(in_features=fc_upres, out_features=fc_midres, **init)
-        self.fc4 = Linear(in_features=fc_midres, out_features=data_dim, **init_zero) #init output layers to ~zero 
-
-        # Encoder.
-        self.enc = torch.nn.ModuleDict()
-        cout = in_channels
-        caux = in_channels
-        for level, mult in enumerate(channel_mult):
-            res = img_resolution >> level
-            if level == 0:
-                cin = cout
-                cout = model_channels
-                self.enc[f'{res}x{res}_conv'] = Conv2d(in_channels=cin, out_channels=cout, kernel=3, **init)
-            else:
-                self.enc[f'{res}x{res}_down'] = UNetBlock(in_channels=cout, out_channels=cout, down=True, **block_kwargs)
-                if encoder_type == 'skip':
-                    self.enc[f'{res}x{res}_aux_down'] = Conv2d(in_channels=caux, out_channels=caux, kernel=0, down=True, resample_filter=resample_filter)
-                    self.enc[f'{res}x{res}_aux_skip'] = Conv2d(in_channels=caux, out_channels=cout, kernel=1, **init)
-                if encoder_type == 'residual':
-                    self.enc[f'{res}x{res}_aux_residual'] = Conv2d(in_channels=caux, out_channels=cout, kernel=3, down=True, resample_filter=resample_filter, fused_resample=True, **init)
-                    caux = cout
-            for idx in range(num_blocks):
-                cin = cout
-                cout = model_channels * mult
-                attn = (res in attn_resolutions)
-                self.enc[f'{res}x{res}_block{idx}'] = UNetBlock(in_channels=cin, out_channels=cout, attention=attn, **block_kwargs)
-        skips = [block.out_channels for name, block in self.enc.items() if 'aux' not in name]
-
-        # Decoder.
-        self.dec = torch.nn.ModuleDict()
-        for level, mult in reversed(list(enumerate(channel_mult))):
-            res = img_resolution >> level
-            if level == len(channel_mult) - 1:
-                self.dec[f'{res}x{res}_in0'] = UNetBlock(in_channels=cout, out_channels=cout, attention=True, **block_kwargs)
-                self.dec[f'{res}x{res}_in1'] = UNetBlock(in_channels=cout, out_channels=cout, **block_kwargs)
-            else:
-                self.dec[f'{res}x{res}_up'] = UNetBlock(in_channels=cout, out_channels=cout, up=True, **block_kwargs)
-            for idx in range(num_blocks + 1):
-                cin = cout + skips.pop()
-                cout = model_channels * mult
-                attn = (idx == num_blocks and res in attn_resolutions)
-                self.dec[f'{res}x{res}_block{idx}'] = UNetBlock(in_channels=cin, out_channels=cout, attention=attn, **block_kwargs)
-            if decoder_type == 'skip' or level == 0:
-                if decoder_type == 'skip' and level < len(channel_mult) - 1:
-                    self.dec[f'{res}x{res}_aux_up'] = Conv2d(in_channels=out_channels, out_channels=out_channels, kernel=0, up=True, resample_filter=resample_filter)
-                self.dec[f'{res}x{res}_aux_norm'] = GroupNorm(num_channels=cout, eps=1e-6)
-                self.dec[f'{res}x{res}_aux_conv'] = Conv2d(in_channels=cout, out_channels=out_channels, kernel=3, **init) #normal init here!! 
-
-    def forward(self, x, noise_labels, class_labels, augment_labels=None):
-        # Noise Mapping.
-        emb = self.map_noise(noise_labels)
-        emb = emb.reshape(emb.shape[0], 2, -1).flip(1).reshape(*emb.shape) # swap sin/cos
-        if self.map_label is not None:
-            tmp = class_labels
-            if self.training and self.label_dropout:
-                tmp = tmp * (torch.rand([x.shape[0], 1], device=x.device) >= self.label_dropout).to(tmp.dtype)
-            emb = emb + self.map_label(tmp * np.sqrt(self.map_label.in_features))
-        if self.map_augment is not None and augment_labels is not None:
-            emb = emb + self.map_augment(augment_labels)
-        emb = silu(self.map_layer0(emb))
-        emb = silu(self.map_layer1(emb))
-        
-        #Fc Upsampling 
-        h1 = silu(self.fc1(x))
-        h2 = silu(self.fc2(h1)).reshape(x.shape[0], self.in_ch, self.img_res, self.img_res)
-
-        # Encoder.
-        skips = []
-        aux = h2 #h2 is our x equivalent here! 
-        for name, block in self.enc.items():
-            if 'aux_down' in name:
-                aux = block(aux)
-            elif 'aux_skip' in name:
-                h2 = skips[-1] = h2 + block(aux)
-            elif 'aux_residual' in name:
-                h2 = skips[-1] = aux = (h2 + block(aux)) / np.sqrt(2)
-            else:
-                h2 = block(h2, emb) if isinstance(block, UNetBlock) else block(h2)
-                skips.append(h2)
-
-        # Decoder.
-        aux = None
-        tmp = None
-        for name, block in self.dec.items():
-            if 'aux_up' in name:
-                aux = block(aux)
-            elif 'aux_norm' in name:
-                tmp = block(h2)
-            elif 'aux_conv' in name:
-                tmp = block(silu(tmp))
-                aux = tmp if aux is None else tmp + aux
-            else:
-                if h2.shape[1] != block.in_channels:
-                    h2 = torch.cat([h2, skips.pop()], dim=1)
-                h2 = block(h2, emb)
-        
-        #Fc DownSampling
-        h3 = silu(self.fc3(aux.reshape(x.shape[0], -1)))
-        h4 = self.fc4(h3)
-        
-        return h4
 #---------------------------------------------------------------------------#
 #Simple toy MLP arch (from CFM repo)
 
@@ -457,7 +254,7 @@ class ToyMLP(torch.nn.Module):
 #VAE encoder class -- from Miles' branch 
 
 @persistence.persistent_class
-class LatentVAE(torch.nn.Module):
+class Latent_MLP_VAE(torch.nn.Module):
     
     def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5):
 
@@ -527,6 +324,82 @@ class LatentVAE(torch.nn.Module):
         kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
         
         return z,-kl_term
+    
+#---------------------------------------------------------------------------
+
+@persistence.persistent_class
+class Latent_CNN_VAE(torch.nn.Module):
+    def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0):
+        
+        super().__init__()
+
+        self.input_dim = img_ch*img_resolution**2
+        self.latent_size = self.input_dim
+        self.img_resolution= img_resolution
+        self.img_ch = img_ch
+        if dims_to_keep < self.input_dim: 
+            d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+            d_max_cds = torch.ones(self.input_dim - dims_to_keep).unsqueeze(0) * eps 
+            self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
+        else: 
+            self.d_max_diag = torch.ones(self.input_dim).unsqueeze(0) #1, dim 
+    
+        # For encoder
+        self.conv1 = torch.nn.Conv2d(1, 16, kernel_size=5, stride=2)
+        self.conv2 = torch.nn.Conv2d(16, 32, kernel_size=5, stride=2)
+        self.linear1 = torch.nn.Linear(32*4*4,300)
+        self.mu = torch.nn.Linear(300, self.latent_size)
+        self.u = torch.nn.Linear(300, self.latent_size)
+        self.d = torch.nn.Linear(300, self.latent_size)
+
+    def encode(self,x):
+        #get mu, u, d 
+        x = x.reshape(-1, self.img_ch, self.img_resolution, self.img_resolution)
+        t = torch.nn.functional.relu(self.conv1(x))
+        t = torch.nn.functional.relu(self.conv2(t))
+        t = t.reshape((x.shape[0], -1))
+        
+        t = torch.nn.functional.relu(self.linear1(t))
+        mu = self.mu(t)
+        u = self.u(t)
+        d = self.d(t)
+
+        #get Ltril mat 
+        u = u.unsqueeze(-1) #bs, dim, 1
+        L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1)) #bs, dim, dim 
+        L = torch.tril(L) #force L to be lower triangular (bs, dim, dim)        
+        
+        #now force diagonals of L to be == 1 
+        L_diag = torch.diagonal(L, dim1=-2, dim2=-1) #bs, dim
+        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #bs, dim
+        L -= torch.diag_embed(L_diag) #remove original diagonal 
+        L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+
+        #now setup D
+        d = torch.exp(d) #d has to be pos
+        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
+        D = torch.diag_embed(d) #bs,dim,dim
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
+        
+        return mu, L_tril         
+        
+    def rsample(self, x):
+        mu, Ltril = self.encode(x)
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=Ltril)
+        z = latent_dist.rsample()
+        return z #bs, dim   
+    
+    def forward(self, x):
+        mu, L_tril = self.encode(x)
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
+        z = latent_dist.rsample()
+        
+        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+        #assert False
+        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
+        
+        return z,-kl_term
+
 
 #----------------------------------------------------------------------------
 # Group normalization.
@@ -1135,6 +1008,7 @@ class  VFMToyNet(torch.nn.Module):
                  dims_to_keep = 2, #number of nominal dimensions encoder should preserve 
                  out_ch=1, #number of channels in output of final conv layer
                  model_type = "ToyConvUNet", #class name for underlying model
+                 encoder_type = "Latent_MLP_VAE",
                  M=1000, 
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
                  width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
@@ -1149,21 +1023,26 @@ class  VFMToyNet(torch.nn.Module):
         self.dims_to_keep = dims_to_keep
         self.model_type = model_type
         self.M = M 
+        
+        #create u,v nets 
         assert model_type in ["ToyConvUNet", "ToyMLP"]
         if model_type=="ToyConvUNet":
-            self.unet_model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
-                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch)
-            self.vnet_model = globals()[model_type](channels=channels, fc_embed_dim=fc_embed_dim, \
-                                               conv_embed_dim=conv_embed_dim, data_dim=data_dim, out_ch=out_ch) 
+            self.unet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch)
+            self.vnet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch) 
         else:
             self.unet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
             self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create encoder net 
-        self.encoder = globals()["LatentVAE"](input_size=data_dim, output_size=data_dim, \
+        assert encoder_type in ["Latent_MLP_VAE", "Latent_CNN_VAE"]
+        if encoder_type == "Latent_MLP_VAE": 
+            self.encoder = globals()[encoder_type](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
                                                   hidden_size=width_encoder, eps=cd_eps) 
-    
+        else: 
+            self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps) 
+        
+        
     def get_x0s(self, x1):
         """
         Samples a pt x0 in latent space, given its dynamics 
