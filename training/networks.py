@@ -1140,7 +1140,9 @@ class  VFMToyNet(torch.nn.Module):
                  width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
                  depth_mlp = 2,  # number of hidden layers for MLPs used for flow and dyn nets
                  width_mlp = 64, # number of hidden units (for each layer) of MLPs used in flow/dynamics nets.
-                 cd_eps = 1e-5 #max variance allowed for compressed dimensions in encoder output. 
+                 cd_eps = 1e-5, #max variance allowed for compressed dimensions in encoder output. 
+                 img_size = 32, #size for img, if using balls or other img toy.
+                 in_ch=1 #input channel if using toy img data.
                  ):
         super().__init__()
         self.data_dim = data_dim
