@@ -25,7 +25,6 @@ def training_loop(
     run_dir             = '.',      # Output directory.
     dataset_kwargs      = {},       # Options for training set.
     data_loader_kwargs  = {},       # Options for constructing dataloader.
-    x0_sampler_kwargs   = {},       # Options for x0 sampling.
     network_kwargs      = {},       # Options for model and preconditioning.
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
@@ -83,19 +82,6 @@ def training_loop(
                                                         batch_size=batch_gpu, **data_loader_kwargs))
         
     
-    #calc W
-    dist.print0('Calculating eigendecomposition...')
-    if dist.get_rank() != 0:
-        torch.distributed.barrier() #rank 0 goes first
-        
-    _, _, W = dnnlib.util.get_eigenvals_basis(np.array(dset_samples).reshape(-1, x0_sampler_kwargs.working_data_dim), \
-                                             n_comp=x0_sampler_kwargs.working_data_dim)
-    W = torch.from_numpy(W).type(torch.float32).to(device)
-    del dset_samples #save mem 
-    
-    if dist.get_rank() == 0: 
-        torch.distributed.barrier() #other ranks follow    
-
     # Construct u, v networks 
     dist.print0('Constructing network...')
     net = dnnlib.util.construct_class_by_name(**network_kwargs) # subclass of torch.nn.Module
@@ -104,7 +90,7 @@ def training_loop(
     
     if dist.get_rank() == 0:
         with torch.no_grad():
-            images = torch.zeros([batch_gpu, x0_sampler_kwargs.working_data_dim], device=device)
+            images = torch.zeros([batch_gpu, net.data_dim], device=device)
             ts = torch.ones([batch_gpu], device=device)
             misc.print_module_summary(net, [images, images, ts], max_nesting=2) #this might not print well (tbd)
            

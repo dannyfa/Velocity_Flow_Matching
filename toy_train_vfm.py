@@ -110,11 +110,7 @@ def main(**kwargs):
     #setup dataloder kwargs 
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)
 
-    
-    #set up additional args to sample x0s
-    c.x0_sampler_kwargs = dnnlib.EasyDict(data_dim=opts.data_dim, working_data_dim=working_data_dim, \
-                                          dims_to_keep=opts.dims_to_keep, eps=opts.eps)
-    
+        
     #setup optimizer kwargs 
     c.optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=opts.lr, betas=[0.9,0.999], eps=1e-8)
     

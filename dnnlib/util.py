@@ -629,45 +629,6 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
     dset_obj = ToyDsetDynamics(dset_samples, dt, nForward=1)
     return dset_obj, dset_samples
 
-#methods to sample (independently) xt,0's
-
-def get_xt_zero_samples(dset_kwargs, n, device, W, concatenated=False):
-    """
-    Sample xt,0's from either full or low-rank MVN 
-    and pass these samples to original IS/data space.
-
-    Can either generate xt,0's for a single pt or for two points (independently)
-    if concatenated ==True.
-    """
-    working_n = 2*n if concatenated else n
-    x0 = torch.randn(working_n, dset_kwargs.working_data_dim).type(torch.float32).to(device)      
-    if dset_kwargs.working_data_dim != dset_kwargs.dims_to_keep:
-        scale =  torch.concatenate([torch.ones(dset_kwargs.dims_to_keep), \
-                                                  torch.ones(dset_kwargs.working_data_dim - dset_kwargs.dims_to_keep)*dset_kwargs.eps], \
-                                      dim=0).type(torch.float32).to(device)
-        x0 *= torch.sqrt(scale)[None, :]
-    x0 = torch.einsum('ij, bjk -> bik', W, x0.unsqueeze(-1)).squeeze(-1) #pass x0 to IS as well
-    if concatenated: 
-        return x0.reshape(n, -1) #n, 2d 
-    else: 
-        return x0
-
-
-#helper to calc PCA decomp. 
-#This will be replaced by streaming SVD 
-
-def get_eigenvals_basis(X, n_comp=784):
-    """
-    Uses sklearn PCA method to obtain U_t matrix 
-    containing eigenvectors of current covariance mat
-    And its correspoding eigenvals.
-    """
-    pca = PCA(n_components=n_comp) 
-    pca.fit(X)
-    eigenvals = pca.explained_variance_
-    U = pca.components_ #eigenvectors are rows of U 
-    return eigenvals, pca, U.T #eigenvectors returned as cols of U
-
 
 #------------------------------------------------------------------------------#
 # methods to run trajectory simulation
