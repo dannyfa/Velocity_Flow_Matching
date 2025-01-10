@@ -45,8 +45,12 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
 @click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
 @click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                          type=int, default=64, show_default=True)
-@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=32, show_default=True)
+
+#Balls dset options
+@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=28, show_default=True)
+@click.option('--data_radius',             help='Radius for balls to be created (if using balls dset)', metavar='INT',                                     type=int, default=3, show_default=True)
 @click.option('--data_inch',               help='Nuber of channels in toy img data (if using balls dset)', metavar='INT',                                  type=int, default=1, show_default=True)
+@click.option('--data_blur',               help='Whether or not to add small blur to created balls',                                                       is_flag=True)
 
 
 # Hyperparameters.
@@ -104,8 +108,12 @@ def main(**kwargs):
     
     #setup dset args
     proj_specs = dnnlib.EasyDict(project_to=opts.project_to, proj_type=opts.project_type, temp=opts.project_temp) if opts.project else None
+    
+    balls_dset_specs = dnnlib.EasyDict(img_shape=[opts.data_imgshape, opts.data_imgshape], radius=opts.data_radius, blur=opts.data_blur) if opts.data_name.lower()=='balls' else None
+            
     c.dataset_kwargs = dnnlib.EasyDict(dset_name = opts.data_name, n_trajs=opts.n_trajs, T=opts.end_t, \
-                                       dt=opts.dt, sigma=opts.sigma_dset, project=opts.project, proj_specs=proj_specs)
+                                       dt=opts.dt, sigma=opts.sigma_dset, project=opts.project, proj_specs=proj_specs, \
+                                           balls_dset_specs = balls_dset_specs)
         
     #setup dataloder kwargs 
     c.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=opts.workers, prefetch_factor=2)

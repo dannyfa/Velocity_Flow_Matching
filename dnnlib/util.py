@@ -380,33 +380,46 @@ class DoubleSDEOrbit(ToyData):
         
         return dx + self.g(x,t,sigma)@self.dW(dt)
 
-#Moving balls dataset (movie)
+#Moving balls dataset (toy movie)
 class Balls(ToyData):
 
-    def __init__(self,coeffs=np.array([[-1,-3],[-3,1]]),seed=1234):
+    def __init__(self,theta=180,seed=1234):
 
+        #dx = -x - 3y
+        #dy = y - 3x
         super(Balls,self).__init__()
-        self.coeffs = np.array(coeffs)
+        self.theta= theta
+        self.coeffs = lambda dt: np.array([[np.cos(theta/(2*np.pi) *dt),-np.sin(theta/(2*np.pi)*dt)],\
+									  [np.sin(theta/(2*np.pi)*dt),np.cos(theta/(2*np.pi)*dt)]])
 
         #self.center2 = -self.center1
         
         self.gen = np.random.default_rng(seed=seed)
 
-    def f(self,x,t):
-
-        return self.coeffs @ x 
-
+    def f(self,x,t,dt):
+    
+        return self.coeffs(dt) @ x 
+    
     def g(self,x,t,sigma):
-
+    
         return sigma*np.eye(2)
-
+    
     def dW(self,dt):
-
+    
         return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=dt*np.eye(2))
     
+    def dx(self,x,t,dt,sigma):
+        
+        x2 = self.f(x,t,dt)
+        gx = self.g(x,t,sigma)
+        dw = self.dW(dt)
+        
+        x2 += gx @ dw
+        return x2 - x
+
     def init_conditions(self):
 
-        return self.gen.multivariate_normal(mean=[-1,0],cov=np.eye(2)*0.25**2)
+        return self.gen.multivariate_normal(mean=[0,0],cov=np.eye(2)*0.25**2)
     
     def traj_to_movie(self,trajectories,image_shape,radius,blur=False):
         """
@@ -597,7 +610,8 @@ def _sigmoid(x:np.array,temp=1):
 
 
 #wrapper to get toy dynamics dset by name 
-def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_specs=None):
+#added option to generate LS balls case, and its corresponds IS/video samples
+def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_specs=None, balls_dset_specs=None):
     """
     Wrapper to construct desired toy dynamic dset from name, params.
     Can handle projections too if desired.
@@ -608,7 +622,8 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
             'lorenz63': "Lorenz63()",
             'lorenz96': "Lorenz96()", 
             'doublesde': "DoubleSDE()", 
-            'doublesdeorbit': "DoubleSDEOrbit()"}
+            'doublesdeorbit': "DoubleSDEOrbit()", 
+               'balls':"Balls()"}
     dset_name = dset_name.lower()
     try: 
         dset_gen_obj = eval(DATASETS[dset_name])
@@ -616,6 +631,7 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
         raise ValueError(f"Unknown Dataset: {dset_name}")
     #sample deserired trajs from it 
     dset_samples = dset_gen_obj.generate(n=n_trajs, T=T, dt=dt, sigma=sigma)
+    ls_dset_samples = None 
     #project data if desired 
     if project: 
         assert proj_specs != None, 'To project need projection specs!'
@@ -625,10 +641,17 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
                                     temp=proj_specs.temp)
         proj_dset_samples = [[projection_obj.project(t) for t in traj] for traj in dset_samples]
         dset_samples = proj_dset_samples
+    if dset_name == 'balls':
+        #pass dset to movie format (from ls trajs)
+        #std imgs too 
+        ls_dset_samples = dset_samples
+        dset_samples = dset_gen_obj.traj_to_movie(dset_samples, balls_dset_specs.img_shape, \
+                                                radius=balls_dset_specs.radius, blur=balls_dset_specs.blur)
+        dset_samples = np.array(dset_samples)
+        dset_samples = ((dset_samples - np.mean(dset_samples))/np.std(dset_samples))
     
     dset_obj = ToyDsetDynamics(dset_samples, dt, nForward=1)
-    return dset_obj, dset_samples
-
+    return dset_obj, dset_samples, ls_dset_samples
 
 #------------------------------------------------------------------------------#
 # methods to run trajectory simulation

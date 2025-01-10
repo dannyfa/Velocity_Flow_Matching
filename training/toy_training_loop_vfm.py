@@ -76,7 +76,7 @@ def training_loop(
         
     #setup dataset and loader 
     dist.print0('Constructing toy dataset...')
-    dataset_obj, dset_samples = dnnlib.util.get_toy_dynamicdset(**dataset_kwargs) 
+    dataset_obj, dset_samples, _ = dnnlib.util.get_toy_dynamicdset(**dataset_kwargs) 
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)  
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, \
                                                         batch_size=batch_gpu, **data_loader_kwargs))
@@ -153,7 +153,9 @@ def training_loop(
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)): 
                 x1s = next(dataset_iterator) 
-                x0_1, xdt_1 = x1s[0].type(torch.float32).to(device), x1s[1].type(torch.float32).to(device) 
+                #make sure data is of proper type, flattened, and on device 
+                x0_1, xdt_1 = x1s[0].type(torch.float32).reshape(x1s[0].shape[0], -1).to(device), \
+                    x1s[1].type(torch.float32).reshape(x1s[1].shape[0], -1).to(device) 
                 loss = loss_fn(net=ddp, x0_1=x0_1, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
                 loss = loss * loss_scales[:, None, None] #3, bs, dim 
                 #log in using original training stats - no grads here! 

@@ -52,6 +52,13 @@ def parse_float_list(s):
 @click.option('--taus',                    help='Tau values to simulate full trajs for  [default: varies]', metavar='LIST',                                type=parse_float_list)
 
 
+#Dset options (if using balls case)
+@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=32, show_default=True)
+@click.option('--data_radius',             help='Radius for balls to be created (if using balls dset)', metavar='INT',                                     type=int, default=3, show_default=True)
+@click.option('--data_inch',               help='Nuber of channels in toy img data (if using balls dset)', metavar='INT',                                  type=int, default=1, show_default=True)
+@click.option('--data_blur',               help='Whether or not to add small blur to created balls',                                                       is_flag=True)
+
+
 def main(**kwargs):
     """
     Runs actual trajectory simulations....
@@ -97,8 +104,15 @@ def main(**kwargs):
     #now construct set of GT trajs using dset options given
     #will use only starting pts of these ... 
     proj_specs = dnnlib.EasyDict(project_to=opts.project_to, proj_type=opts.project_type, temp=opts.project_temp) if opts.project else None 
-    _, dset_samples = dnnlib.util.get_toy_dynamicdset(opts.data_name, opts.n_trajs, opts.end_t, opts.dt, opts.sigma_dset, project=opts.project, proj_specs=proj_specs)
+    
+    balls_dset_specs = dnnlib.EasyDict(img_shape=[opts.data_imgshape, opts.data_imgshape], radius=opts.data_radius, blur=opts.data_blur) \
+        if opts.data_name.lower()=='balls' else None
+
+    _, dset_samples, _ = dnnlib.util.get_toy_dynamicdset(opts.data_name, opts.n_trajs, opts.end_t, opts.dt, opts.sigma_dset, \
+                                                        project=opts.project, proj_specs=proj_specs, balls_dset_specs=balls_dset_specs)    
+    
     data = np.array(dset_samples) #n_trajs, traj_len, dims
+    data = np.reshape(data, (data.shape[0], data.shape[1], -1)) #make sure this is flat on dims! 
     
     starting_pts = torch.from_numpy(data[:, 0, :]).unsqueeze(1).type(torch.float32).to(device) #ntrajs,1,dim
     
