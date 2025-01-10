@@ -1002,14 +1002,11 @@ class  VFMToyNet(torch.nn.Module):
     """
     def __init__(self, 
                  channels = [32, 64, 128, 256], #Channels for feature maps of each resolution of conv layers
-                 fc_embed_dim = 2,  # Dimensionality for Gaussian random feature embeddings for fc layers 
                  conv_embed_dim = 256,  # Dimensionality for Gaussian random feature embeddings for conv layers
                  data_dim=2, #dimensionality of data we will feed through Net 
                  dims_to_keep = 2, #number of nominal dimensions encoder should preserve 
-                 out_ch=1, #number of channels in output of final conv layer
                  model_type = "ToyConvUNet", #class name for underlying model
                  encoder_type = "Latent_MLP_VAE",
-                 M=1000, 
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
                  width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
                  depth_mlp = 2,  # number of hidden layers for MLPs used for flow and dyn nets
@@ -1022,7 +1019,6 @@ class  VFMToyNet(torch.nn.Module):
         self.data_dim = data_dim
         self.dims_to_keep = dims_to_keep
         self.model_type = model_type
-        self.M = M 
         
         #create u,v nets 
         assert model_type in ["ToyConvUNet", "ToyMLP"]
@@ -1052,9 +1048,8 @@ class  VFMToyNet(torch.nn.Module):
         return x0
         
     def forward(self, x0_tau, xt_tau, taus): 
-        cnoise = (self.M-1)*taus if self.model_type=="ToyConvUNet" else taus
-        u = self.unet_model(x0_tau, cnoise)
-        v = self.vnet_model(xt_tau, cnoise) 
+        u = self.unet_model(x0_tau, taus)
+        v = self.vnet_model(xt_tau, taus) 
         return u, v
     
     

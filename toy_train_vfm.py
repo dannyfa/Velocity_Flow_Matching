@@ -135,9 +135,9 @@ def main(**kwargs):
     
     #setup net kwargs 
     if opts.arch == "ToyConvUNet": 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], fc_embed_dim=2, conv_embed_dim=256, \
+        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], conv_embed_dim=256, \
                                                data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                                   out_ch=1, class_name='training.networks.VFMToyNet') 
+                                                   class_name='training.networks.VFMToyNet') 
     elif opts.arch=='ToyMLP': 
         c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
                                            class_name='training.networks.VFMToyNet')
