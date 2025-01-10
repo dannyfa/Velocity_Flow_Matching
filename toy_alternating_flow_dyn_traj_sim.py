@@ -24,9 +24,14 @@ from torch_utils import distributed as dist
 
 @click.command()
 
-# Main options.
+# General options.
 @click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                type=str, required=True)
 @click.option('--network',                 help='Network to use when simulating trajs', metavar='STR',                                                     type=str, required=True)
+@click.option('--device',                  help='Name of device to use', metavar='STR',                                                                    type=str, default='cuda:0', show_default=True)
+@click.option('--tps_per_tau',             help='Number of t steps to take per tau', metavar='INT',                                                        type=int, default=200, show_default=True)
+@click.option('--num_taus',                help='Number of linearly space taus to simulate dynamics for', metavar='INT',                                   type=int, default=5, show_default=True)
+
+#Main Dset Options
 @click.option('--data_name',               help='Name of toy dset to use', metavar='STR',                                                                  type=str, required=True)
 @click.option('--data_dim',                help='Number of dimensions in original dset (w/out projection)', metavar='INT',                                 type=int, required=True)
 @click.option('--dims_to_keep',            help='Number of dimensions to keep', metavar='INT',                                                             type=int, required=True)
@@ -34,13 +39,12 @@ from torch_utils import distributed as dist
 @click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                  type=float, default=1.0, show_default=True)
 @click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                           type=float, default=1e-3, show_default=True)
 @click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=0.25, show_default=True)
+
+#Projection Options 
 @click.option('--project',                 help='Project original dset to higher dimensional space',                                                       is_flag=True)
 @click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                 type=int, default=3, show_default=True)
 @click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
 @click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                type=float, default=1.2, show_default=True)
-@click.option('--device',                  help='Name of device to use', metavar='STR',                                                                    type=str, default='cuda:0', show_default=True)
-@click.option('--tps_per_tau',             help='Number of t steps to take per tau', metavar='INT',                                                        type=int, default=200, show_default=True)
-@click.option('--num_taus',                help='Number of linearly space taus to simulate dynamics for', metavar='INT',                                   type=int, default=5, show_default=True)
 
 #Dset options (if using balls case)
 @click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=28, show_default=True)

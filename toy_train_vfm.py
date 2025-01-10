@@ -24,8 +24,7 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 
 @click.command()
 
-# Main options.
-@click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                type=str, required=True)
+# Main Dset Options
 @click.option('--data_name',               help='Name of toy dset to use', metavar='STR',                                                                  type=str, required=True)
 @click.option('--data_dim',                help='Number of dimensions in original dset (w/out projection)', metavar='INT',                                 type=int, required=True)
 @click.option('--dims_to_keep',            help='Number of dimensions to keep', metavar='INT',                                                             type=int, required=True)
@@ -33,18 +32,12 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                  type=float, default=1.0, show_default=True)
 @click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                           type=float, default=1e-3, show_default=True)
 @click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=0.25, show_default=True)
+
+# Projection Options 
 @click.option('--project',                 help='Project original dset to higher dimensional space',                                                       is_flag=True)
 @click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                 type=int, default=3, show_default=True)
 @click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
 @click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                type=float, default=1.2, show_default=True)
-@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                         type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
-@click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
-@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
-@click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
-@click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
-@click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
-@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
-@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                          type=int, default=64, show_default=True)
 
 #Balls dset options
 @click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=28, show_default=True)
@@ -52,8 +45,20 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--data_inch',               help='Nuber of channels in toy img data (if using balls dset)', metavar='INT',                                  type=int, default=1, show_default=True)
 @click.option('--data_blur',               help='Whether or not to add small blur to created balls',                                                       is_flag=True)
 
+#FM options
+@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                         type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
+@click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
+@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
 
-# Hyperparameters.
+#Arch Options
+@click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
+@click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
+@click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
+@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
+@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                          type=int, default=64, show_default=True)
+
+
+# Training Hyperparameters.
 @click.option('--duration',               help='Training duration', metavar='MIMG',                                                                        type=click.FloatRange(min=0, min_open=True), default=7000, show_default=True)
 @click.option('--batch',                  help='Total batch size', metavar='INT',                                                                          type=click.IntRange(min=1), default=8192, show_default=True)
 @click.option('--batch-gpu',              help='Limit batch size per GPU', metavar='INT',                                                                  type=click.IntRange(min=1), default=1024, show_default=True)
@@ -75,6 +80,7 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 
 
 # I/O-related.
+@click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                type=str, required=True)
 @click.option('--desc',                   help='String to include in result dir name', metavar='STR',                                                      type=str)
 @click.option('--nosubdir',               help='Do not create a subdirectory for results',                                                                 is_flag=True)
 @click.option('--tick',                   help='How often to print progress', metavar='KIMG',                                                              type=click.IntRange(min=1), default=50, show_default=True)
