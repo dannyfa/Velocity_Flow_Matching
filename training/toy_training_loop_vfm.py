@@ -25,7 +25,6 @@ def training_loop(
     run_dir             = '.',      # Output directory.
     dataset_kwargs      = {},       # Options for training set.
     data_loader_kwargs  = {},       # Options for constructing dataloader.
-    x0_sampler_kwargs   = {},       # Options for x0 sampling.
     network_kwargs      = {},       # Options for model and preconditioning.
     loss_kwargs         = {},       # Options for loss function.
     optimizer_kwargs    = {},       # Options for optimizer.
@@ -77,25 +76,12 @@ def training_loop(
         
     #setup dataset and loader 
     dist.print0('Constructing toy dataset...')
-    dataset_obj, dset_samples = dnnlib.util.get_toy_dynamicdset(**dataset_kwargs) 
+    dataset_obj, dset_samples, _ = dnnlib.util.get_toy_dynamicdset(**dataset_kwargs) 
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)  
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, \
                                                         batch_size=batch_gpu, **data_loader_kwargs))
         
     
-    #calc W
-    dist.print0('Calculating eigendecomposition...')
-    if dist.get_rank() != 0:
-        torch.distributed.barrier() #rank 0 goes first
-        
-    _, _, W = dnnlib.util.get_eigenvals_basis(np.array(dset_samples).reshape(-1, x0_sampler_kwargs.working_data_dim), \
-                                             n_comp=x0_sampler_kwargs.working_data_dim)
-    W = torch.from_numpy(W).type(torch.float32).to(device)
-    del dset_samples #save mem 
-    
-    if dist.get_rank() == 0: 
-        torch.distributed.barrier() #other ranks follow    
-
     # Construct u, v networks 
     dist.print0('Constructing network...')
     net = dnnlib.util.construct_class_by_name(**network_kwargs) # subclass of torch.nn.Module
@@ -104,7 +90,7 @@ def training_loop(
     
     if dist.get_rank() == 0:
         with torch.no_grad():
-            images = torch.zeros([batch_gpu, x0_sampler_kwargs.working_data_dim], device=device)
+            images = torch.zeros([batch_gpu, net.data_dim], device=device)
             ts = torch.ones([batch_gpu], device=device)
             misc.print_module_summary(net, [images, images, ts], max_nesting=2) #this might not print well (tbd)
            
@@ -167,10 +153,10 @@ def training_loop(
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)): 
                 x1s = next(dataset_iterator) 
-                x0s = dnnlib.util.get_xt_zero_samples(x0_sampler_kwargs, batch_gpu, device, W, concatenated=True) 
-                x0_1, xdt_1 = x1s[0].type(torch.float32).to(device), x1s[1].type(torch.float32).to(device) 
-                x0_0, xdt_0 = x0s[:, 0:x0_sampler_kwargs.working_data_dim], x0s[:, x0_sampler_kwargs.working_data_dim:] 
-                loss = loss_fn(net=ddp, x0_0=x0_0, x0_1=x0_1, xdt_0=xdt_0, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
+                #make sure data is of proper type, flattened, and on device 
+                x0_1, xdt_1 = x1s[0].type(torch.float32).reshape(x1s[0].shape[0], -1).to(device), \
+                    x1s[1].type(torch.float32).reshape(x1s[1].shape[0], -1).to(device) 
+                loss = loss_fn(net=ddp, x0_1=x0_1, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
                 loss = loss * loss_scales[:, None, None] #3, bs, dim 
                 #log in using original training stats - no grads here! 
                 training_stats.report('Loss/loss', torch.sum(loss.detach(), dim=0)) #bs, dim
@@ -217,6 +203,7 @@ def training_loop(
             writer.add_scalar('flow_train_loss', tot_separate_losses[0].item(), gs)
             writer.add_scalar('dyn_train_loss', tot_separate_losses[1].item(), gs)
             writer.add_scalar('lie_derivative_loss', tot_separate_losses[2].item(), gs)
+            writer.add_scalar('Kimgs', cur_nimg/1000, gs)
             gs+=1
 
         # Perform maintenance tasks once per tick.

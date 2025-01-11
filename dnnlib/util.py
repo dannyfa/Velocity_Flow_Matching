@@ -33,7 +33,7 @@ from scipy.ndimage import gaussian_filter
 
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
-
+from torchdyn.core import NeuralODE
 
 #------------------------------------------------------------------------------------------#
 # Utils for VFM
@@ -186,6 +186,7 @@ class DoubleCircles(ToyData):
         xy2 = newX + dw_xy
         
         return xy2 - x
+    
 
 #Lorenz attractor - 3D ODE sys 
 class Lorenz63(ToyData):
@@ -321,34 +322,104 @@ class DoubleSDE(ToyData):
             xx2 = self._polar_to_cartesian(r,theta) + self.center2
 
         return xx2 + self.g(x,t,sigma)@self.dW(dt) - x
+    
+#Alternative double SDE 
+class DoubleSDEOrbit(ToyData):
 
-#Moving balls dataset (movie)
+    def __init__(self,coeffs=[1.65*np.pi,np.array([-8,0]),np.array([8,0])],mass=7000,seed=1234):
+
+        super(DoubleSDEOrbit,self).__init__()
+        self.omega,self.center1,self.center2 = coeffs
+        self.mass=mass
+        self.gen = np.random.default_rng(seed=seed)
+
+    def f(self,x,t):
+        r1,theta1 = self._cartesian_to_polar(self.center1-x)
+        r2,theta2 = self._cartesian_to_polar(self.center2-x)
+        F1 = self.mass/r1**3
+        F2 = self.mass/r2**3
+        return F1 * (self.center1- x) + F2 * (self.center2-x)
+
+    def g(self,x,t,sigma):
+        return sigma * np.eye(2)#/(np.abs(x[0])+1/10)
+    
+    def dW(self,dt):
+        return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=np.eye(2)*dt)
+    
+    def _polar_to_cartesian(self,r,theta):
+    
+        return np.hstack([r*np.cos(theta),r*np.sin(theta)])
+    
+    def _cartesian_to_polar(self,xy):
+    
+        r = np.linalg.norm(xy)
+        theta = np.arctan2(xy[1],xy[0])
+        return r,theta
+
+    def init_conditions(self):
+
+        init_xy = self.gen.multivariate_normal(mean=[0,0],cov=np.array([[0,0],[0,2]]))
+        if init_xy[0] < 0:
+            r1,theta1 = self._cartesian_to_polar(init_xy - self.center1)
+            omega = self.omega
+        else:
+            r1,theta1 = self._cartesian_to_polar(init_xy - self.center2)
+            omega = -self.omega
+        self.vel = np.array([-omega*r1 *np.sin(theta1), omega*r1*np.cos(theta1)])
+
+        
+        return init_xy
+
+    def dx(self,x,t,dt,sigma):
+
+        
+        dv = self.f(x,t)*dt
+        
+        dx = self.vel * dt
+        self.vel += dv
+        
+        return dx + self.g(x,t,sigma)@self.dW(dt)
+
+#Moving balls dataset (toy movie)
 class Balls(ToyData):
 
-    def __init__(self,coeffs=np.array([[-1,-3],[-3,1]]),seed=1234):
+    def __init__(self,theta=180,seed=1234):
 
+        #dx = -x - 3y
+        #dy = y - 3x
         super(Balls,self).__init__()
-        self.coeffs = np.array(coeffs)
+        self.theta= theta
+        self.coeffs = lambda dt: np.array([[np.cos(theta/(2*np.pi) *dt),-np.sin(theta/(2*np.pi)*dt)],\
+									  [np.sin(theta/(2*np.pi)*dt),np.cos(theta/(2*np.pi)*dt)]])
 
         #self.center2 = -self.center1
         
         self.gen = np.random.default_rng(seed=seed)
 
-    def f(self,x,t):
-
-        return self.coeffs @ x 
-
+    def f(self,x,t,dt):
+    
+        return self.coeffs(dt) @ x 
+    
     def g(self,x,t,sigma):
-
+    
         return sigma*np.eye(2)
-
+    
     def dW(self,dt):
-
+    
         return self.gen.multivariate_normal(mean=np.zeros((2,)),cov=dt*np.eye(2))
     
+    def dx(self,x,t,dt,sigma):
+        
+        x2 = self.f(x,t,dt)
+        gx = self.g(x,t,sigma)
+        dw = self.dW(dt)
+        
+        x2 += gx @ dw
+        return x2 - x
+
     def init_conditions(self):
 
-        return self.gen.multivariate_normal(mean=[-1,0],cov=np.eye(2)*0.25**2)
+        return self.gen.multivariate_normal(mean=[0,0],cov=np.eye(2)*0.25**2)
     
     def traj_to_movie(self,trajectories,image_shape,radius,blur=False):
         """
@@ -474,7 +545,7 @@ class projection():
 
             assert self.temp >0, print("Temperature should be a positive number")
             self.projection = lambda x: _swish(x @ self.W,temp=self.temp)
-        elif projType == 'double swish':
+        elif projType == 'double_swish':
 
             assert self.temp >0, print("Temperature should be a positive number")
             self.projection = lambda x: _double_swish(x @ self.W,temp=self.temp)
@@ -539,7 +610,8 @@ def _sigmoid(x:np.array,temp=1):
 
 
 #wrapper to get toy dynamics dset by name 
-def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_specs=None):
+#added option to generate LS balls case, and its corresponds IS/video samples
+def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_specs=None, balls_dset_specs=None):
     """
     Wrapper to construct desired toy dynamic dset from name, params.
     Can handle projections too if desired.
@@ -549,7 +621,9 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
             'rossler': "Rossler()", 
             'lorenz63': "Lorenz63()",
             'lorenz96': "Lorenz96()", 
-            'doublesde': "DoubleSDE()"}
+            'doublesde': "DoubleSDE()", 
+            'doublesdeorbit': "DoubleSDEOrbit()", 
+               'balls':"Balls()"}
     dset_name = dset_name.lower()
     try: 
         dset_gen_obj = eval(DATASETS[dset_name])
@@ -557,6 +631,7 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
         raise ValueError(f"Unknown Dataset: {dset_name}")
     #sample deserired trajs from it 
     dset_samples = dset_gen_obj.generate(n=n_trajs, T=T, dt=dt, sigma=sigma)
+    ls_dset_samples = None 
     #project data if desired 
     if project: 
         assert proj_specs != None, 'To project need projection specs!'
@@ -566,49 +641,107 @@ def get_toy_dynamicdset(dset_name, n_trajs, T, dt, sigma, project=False, proj_sp
                                     temp=proj_specs.temp)
         proj_dset_samples = [[projection_obj.project(t) for t in traj] for traj in dset_samples]
         dset_samples = proj_dset_samples
+    if dset_name == 'balls':
+        #pass dset to movie format (from ls trajs)
+        #std imgs too 
+        ls_dset_samples = dset_samples
+        dset_samples = dset_gen_obj.traj_to_movie(dset_samples, balls_dset_specs.img_shape, \
+                                                radius=balls_dset_specs.radius, blur=balls_dset_specs.blur)
+        dset_samples = np.array(dset_samples)
+        dset_samples = ((dset_samples - np.mean(dset_samples))/np.std(dset_samples))
     
     dset_obj = ToyDsetDynamics(dset_samples, dt, nForward=1)
-    return dset_obj, dset_samples
+    return dset_obj, dset_samples, ls_dset_samples
 
-#methods to sample (independently) xt,0's
+#------------------------------------------------------------------------------#
+# methods to run trajectory simulation
+#------------------------------------------------------------------------------#
 
-def get_xt_zero_samples(dset_kwargs, n, device, W, concatenated=False):
+#for flow net 
+
+class flow_torch_wrapper(torch.nn.Module):
     """
-    Sample xt,0's from either full or low-rank MVN 
-    and pass these samples to original IS/data space.
-
-    Can either generate xt,0's for a single pt or for two points (independently)
-    if concatenated ==True.
+    Wraps model to torchdyn compatible format.
+    
+    This is for flow net mapping between DS and LS.
+    
     """
-    working_n = 2*n if concatenated else n
-    x0 = torch.randn(working_n, dset_kwargs.working_data_dim).type(torch.float32).to(device)      
-    if dset_kwargs.working_data_dim != dset_kwargs.dims_to_keep:
-        scale =  torch.concatenate([torch.ones(dset_kwargs.dims_to_keep), \
-                                                  torch.ones(dset_kwargs.working_data_dim - dset_kwargs.dims_to_keep)*dset_kwargs.eps], \
-                                      dim=0).type(torch.float32).to(device)
-        x0 *= torch.sqrt(scale)[None, :]
-    x0 = torch.einsum('ij, bjk -> bik', W, x0.unsqueeze(-1)).squeeze(-1) #pass x0 to IS as well
-    if concatenated: 
-        return x0.reshape(n, -1) #n, 2d 
-    else: 
-        return x0
+    def __init__(self, model):
+        super().__init__()
+        self.model = model
 
+    def forward(self, t, x, *args, **kwargs):
+        t = t.repeat(x.shape[0]) #bs 
+        out = self.model(x, t)        
+        return out
 
-#helper to calc PCA decomp. 
-#This will be replaced by streaming SVD 
-
-def get_eigenvals_basis(X, n_comp=784):
+def calc_flow_trajectories(model, init_samples, start_tau, end_tau, nt=100):
     """
-    Uses sklearn PCA method to obtain U_t matrix 
-    containing eigenvectors of current covariance mat
-    And its correspoding eigenvals.
+    Computes ODE trajectories for plotting/checking
+    model during training.
+    
+    Args
+    -----
+    model: torch.nn.Module. Instance of IFsCFMToyNet class. 
+    dset_kwargs: dict. Contains original args for data specification.
+    loss_fn: instance of IFsCFMToyLoss class. 
+    n:int. Number of samples to simulate.
+    nt: number of time pts to use for trajectory integration.
+    device: instance of torch.device.
     """
-    pca = PCA(n_components=n_comp) 
-    pca.fit(X)
-    eigenvals = pca.explained_variance_
-    U = pca.components_ #eigenvectors are rows of U 
-    return eigenvals, pca, U.T #eigenvectors returned as cols of U
+    #setup node 
+    node = NeuralODE(flow_torch_wrapper(model), solver='dopri5', \
+                     sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+    #get ts 
+    ts = torch.linspace(start_tau, end_tau, nt).to(init_samples.device)
+    #now sim ODE 
+    with torch.no_grad():
+        traj = node.trajectory(init_samples, ts)
+    return traj
 
+
+#for dynamics net 
+
+class dyn_torch_wrapper(torch.nn.Module):
+    """
+    Wraps model to torchdyn compatible format.
+    
+    Note that this allows to call dynamics net
+    at different taus.
+    
+    """
+
+    def __init__(self, model, tau):
+        super().__init__()
+        self.model = model
+        self.tau = tau 
+
+    def forward(self, t, x, *args, **kwargs):
+        net_taus = torch.ones(x.shape[0]).type(torch.float32).to(x.device)*self.tau
+        out = self.model(x, net_taus)        
+        return out
+
+
+def calc_dyn_trajectories(model, init_samples, tau, nt=100):
+    """
+    Computes dynamics net trajectories for a given set of initial
+    samples and tau.
+    
+    Args
+    -----
+    model: torch.nn.Module. Instance of a trained dynamics net.
+    init_samples: torch.Tensor. [bs, d]
+    tau: float. Flow time we wish to simulate corresponding dynamics.
+    """
+    #setup node 
+    node = NeuralODE(dyn_torch_wrapper(model, tau), solver='dopri5', \
+                     sensitivity="adjoint", atol=1e-4, rtol=1e-4)
+    #get ts 
+    ts = torch.linspace(0.0, 1.0, nt).to(init_samples.device)
+    #now sim ODE 
+    with torch.no_grad():
+        traj = node.trajectory(init_samples, ts)
+    return traj
 
 #------------------------------------------------------------------------------#
 
