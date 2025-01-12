@@ -1,4 +1,4 @@
-name: ifs
+name: vfm
 channels:
   - pytorch
   - nvidia
@@ -17,9 +17,9 @@ dependencies:
   - requests
   - tqdm
   - imageio
+  - pot>=0.8.2 #python OT package
+  - matplotlib>=3.8.0
   - pip:
     - imageio-ffmpeg>=0.4.3
     - pyspng
-    - alphashape==1.3.1
-    - shapely==2.0.3
-    - open3d==0.17.0
+    - torchdyn>=1.0.6
