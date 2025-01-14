@@ -18,6 +18,7 @@ from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import misc
 from torch.utils.tensorboard import SummaryWriter
+from torch_cfm import conditional_flow_matching as cfm
 
 #----------------------------------------------------------------------------
 
@@ -92,7 +93,9 @@ def training_loop(
         with torch.no_grad():
             images = torch.zeros([batch_gpu, net.data_dim], device=device)
             ts = torch.ones([batch_gpu], device=device)
-            misc.print_module_summary(net, [images, images, ts], max_nesting=2) #this might not print well (tbd)
+            test_flow_matcher = cfm.ConditionalFlowMatcher(sigma=0.1)
+            misc.print_module_summary(net, [images, images, ts, ts, 1e-3, \
+                                            test_flow_matcher, test_flow_matcher], max_nesting=2) #this might not print well (tbd)
            
 
     # Setup optimizer and lossfn

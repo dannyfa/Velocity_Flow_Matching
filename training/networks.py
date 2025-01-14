@@ -1038,18 +1038,36 @@ class  VFMToyNet(torch.nn.Module):
         else: 
             self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps) 
         
+                
+    def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher): 
         
-    def get_x0s(self, x1):
-        """
-        Samples a pt x0 in latent space, given its dynamics 
-        equivalent in data space.
-        """
-        x0 = self.encoder.rsample(x1)
-        return x0
+        #get x0_0, xdt_0 
+        x0_0 = self.encoder.rsample(x0_1)
+        xdt_0 = self.encoder.rsample(xdt_1)
         
-    def forward(self, x0_tau, xt_tau, taus): 
+        #get x0_tau, u0_tau; xdt_tau
+        _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+        _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)        
+        
+        
+        #get xt_tau, ut_tau 
+        _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
+        
+        #now get net estimates for u, v 
         u = self.unet_model(x0_tau, taus)
         v = self.vnet_model(xt_tau, taus) 
-        return u, v
+        
+        #get components of Lie Loss that require grad calc
+        taus.requires_grad=True
+        
+        vnet_jac = torch.autograd.functional.jacobian(self.vnet_model, (xt_tau, taus))
+        nabla_v = torch.sum(vnet_jac[0], dim=2).transpose(2,1) #bs, d, d
+        partial_tau_v = torch.sum(vnet_jac[1], dim=2) #bs,d 
+        
+        unet_jac = torch.autograd.functional.jacobian(self.unet_model, (x0_tau, taus))
+        nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
+        
+        
+        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v 
     
     

@@ -117,18 +117,7 @@ class VFMToyLoss:
         #this is always just regular flow matcher! 
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma)
     
-    def calc_lie_derivative(self, net, x0_tau, xt_tau, taus, u, v):
-        #get Jacobian for all net outputs w.r.t. inputs! 
-        taus.requires_grad=True
-        net_jac = torch.autograd.functional.jacobian(net, (x0_tau, xt_tau, taus))
-        
-        #get \nabla u 
-        nabla_u = torch.sum(net_jac[0][0], dim=2).transpose(2,1) #bs, d, d
-        
-        #get \nabla v, \partial_tau v 
-        nabla_v = torch.sum(net_jac[1][1], dim=2).transpose(2,1) #bs, d, d
-        partial_tau_v = torch.sum(net_jac[1][2], dim=2) #bs, d
-        
+    def calc_lie_derivative(self, u, v, nabla_u, nabla_v, partial_tau_v):
         
         # calc whole Lie derivative 
         # \partial_tau_v + u \cdot \nabla_v - v \cdot \nabla_u 
@@ -140,35 +129,23 @@ class VFMToyLoss:
                 
     def __call__(self, net, x0_1, xdt_1, dt):
         
-        #get x0_0, xdt_0
-        x0_0 = net.module.get_x0s(x0_1)
-        xdt_0 = net.module.get_x0s(xdt_1)
+        #sample taus, ts
+        taus = torch.rand(x0_1.shape[0], device=x0_1.device) # \tau \sim U[0,1]
+        ts = torch.rand(xdt_1.shape[0], device=xdt_1.device) * dt #\t \sim U[0, dt]
         
-       
-        #sample taus
-        taus = torch.rand(x0_0.shape[0], device=x0_0.device) # \tau \sim U[0,1]
-        #sample ts 
-        ts = torch.rand(xdt_0.shape[0], device=xdt_0.device) * dt #\t \sim U[0, dt]
-        
-        
-        #get x0_tau, u0_tau
-        _, x0_tau, u0_tau = self.tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
-        _, xdt_tau, _ = self.tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
-        
-        
-        #get xt_tau, ut_tau 
-        _, xt_tau, ut_tau = self.t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
-                
-        #now get net estimates for u,v ... 
-        u, v = net(x0_tau, xt_tau, taus)
+        #pass these to net obj
+        u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v = net(x0_1, xdt_1, taus, ts, dt, \
+                                                                    self.tau_flowmatcher, self.t_flowmatcher)
         
         #calc different loss pieces 
+        
+        #flow, dyn losses 
         flow_loss = (u - u0_tau)**2 #bs, dim
         dyn_loss = (v - ut_tau) **2 #bs, dim
         
-        #lie derivative 
-        lie_loss = (self.calc_lie_derivative(net, x0_tau, xt_tau, taus, u, v))**2 #bs, dim
+        #lie loss 
+        lie_loss = (self.calc_lie_derivative(u, v, nabla_u, nabla_v, partial_tau_v))**2 
         
-        return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), lie_loss.unsqueeze(0)], dim=0) # 3, bs, dim  
-
-
+        return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), \
+                          lie_loss.unsqueeze(0)], dim=0) # 3, bs, dim 
+        
