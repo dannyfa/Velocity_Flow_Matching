@@ -263,6 +263,17 @@ def training_loop(
             for tag, value in net.named_parameters():
                 if value.grad is not None:
                     writer.add_histogram(tag+"/grad", value.grad.cpu(), gs) 
+            #log encoded trajs, if working with balls dset
+            if dataset_kwargs.balls_dset_specs != None:
+                gt_trajs = np.array(dset_samples) #pass gt_trajs to numpy
+                gt_trajs = np.reshape(gt_trajs, (gt_trajs.shape[0], gt_trajs.shape[1], -1)) #flatten across img dims
+                orig_traj, enc_traj = dnnlib.util.sim_encoded_trajs(gt_trajs, net.encoder, device)
+                orig_fig, enc_fig = dnnlib.util.plot_encoded_trajs(orig_traj, enc_traj, \
+                                                                   dataset_kwargs.balls_dset_specs.img_shape[0])
+                
+                writer.add_figure("gt_traj", orig_fig, gs)
+                writer.add_figure("encoded_traj", enc_fig, gs)
+                writer.flush()
 
         # Update logs.
         training_stats.default_collector.update()

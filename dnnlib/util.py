@@ -30,6 +30,7 @@ from torch.utils.data.dataset import Dataset
 from sklearn.decomposition import PCA
 from abc import ABC,abstractmethod
 from scipy.ndimage import gaussian_filter
+import matplotlib.pyplot as plt 
 
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
@@ -743,6 +744,45 @@ def calc_dyn_trajectories(model, init_samples, tau, nt=100):
         traj = node.trajectory(init_samples, ts)
     return traj
 
+
+#method to simulate traj encoding 
+
+def sim_encoded_trajs(gt_trajs, encoder_net, device):
+    """
+    Chooses one GT traj from training set at random
+    and encodes it. 
+    """
+    traj_to_sim_idx = np.random.choice(np.arange(gt_trajs.shape[0]), size=1, replace=False)
+    traj_to_sim = torch.from_numpy(gt_trajs[traj_to_sim_idx, :, :]).type(torch.float32).to(device).squeeze(0)
+    with torch.no_grad():
+        encoded_traj = encoder_net.rsample(traj_to_sim)
+    return traj_to_sim.cpu().numpy(), encoded_traj.detach().cpu().numpy()
+
+
+def plot_balls_traj(traj_to_plot):
+    """
+    Constructs simple 5x10 grid with 50 first
+    steps of a given trajectory.
+    """
+    fig,axs = plt.subplots(nrows=5,ncols=10, figsize=(10,10))
+    for i in range(5):
+        for j in range(10):
+            frame_idx = i*10 + j 
+            frame_to_plot = traj_to_plot[frame_idx, :, :, :]
+            axs[i, j].imshow(np.squeeze(frame_to_plot), cmap='gray')
+    return fig 
+
+
+def plot_encoded_trajs(gt_traj, encoded_traj, imgshape):
+    """
+    Construct GT vs. encoded trajectories figure
+    which will be logged into TB.
+    """
+    gt_fig = plot_balls_traj(gt_traj.reshape(-1, imgshape, imgshape, 1))
+    enc_fig = plot_balls_traj(encoded_traj.reshape(-1, imgshape, imgshape, 1))
+    return gt_fig, enc_fig 
+    
+    
 #------------------------------------------------------------------------------#
 
 # Util classes (EDM repo)
