@@ -18,6 +18,7 @@ import torch
 import torch.distributions as D 
 from torch_utils import persistence
 from torch.nn.functional import silu
+import os
 from torch_cfm.models.unet.unet import UNetModelWrapper 
 
 #----------------------------------------------------------------------------
@@ -256,7 +257,7 @@ class ToyMLP(torch.nn.Module):
 @persistence.persistent_class
 class Latent_MLP_VAE(torch.nn.Module):
     
-    def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5):
+    def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5, d_min=1e-10):
 
         super().__init__()
 
@@ -288,6 +289,10 @@ class Latent_MLP_VAE(torch.nn.Module):
         else: 
             self.d_max_diag = torch.ones(output_size).unsqueeze(0) #1, dim 
         
+        #set out min val for D diag
+        #this is just to avoid chol from failing as model trains 
+        self.d_min_diag = torch.ones(output_size).unsqueeze(0)*d_min #1, dim 
+        
     def encode(self, x):
         mu,u, d = self.mu(x),self.u(x),self.d(x)
         u = u.unsqueeze(-1) #bs,dim,1
@@ -300,36 +305,39 @@ class Latent_MLP_VAE(torch.nn.Module):
         L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
         #now setup D
         d = torch.exp(d) #d has to be pos
-        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
-        D = torch.diag_embed(d) #bs,dim,dim
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
-        return mu, L_tril 
+        d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
+        d = torch.diag_embed(d) #bs,dim,dim
+        return mu, d, L
+
     
     def rsample(self, x):
-        mu, L_tril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
-        z = latent_dist.rsample()
-        return z 
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril) 
+        z = latent_dist.rsample() 
+        return z
+
         
     def forward(self,x):
         
-        mu, L_tril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
-        z = latent_dist.rsample()
-        #print(z.shape)
-        #print(latent_dist.entropy().shape)
-        
-        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril) 
+        z = latent_dist.rsample() 
+        #print(z.shape) 
+        #print(latent_dist.entropy().shape) 
+        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi)) 
         #assert False
-        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
-        
-        return z,-kl_term
+        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy()) 
+        return z, -kl_term
+
     
 #---------------------------------------------------------------------------
 
 @persistence.persistent_class
 class Latent_CNN_VAE(torch.nn.Module):
-    def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0):
+    def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-10):
         
         super().__init__()
 
@@ -343,6 +351,10 @@ class Latent_CNN_VAE(torch.nn.Module):
             self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
         else: 
             self.d_max_diag = torch.ones(self.input_dim).unsqueeze(0) #1, dim 
+
+        #set out min val for D diag
+        #this is just to avoid chol from failing as model trains 
+        self.d_min_diag = torch.ones(self.input_dim).unsqueeze(0)*d_min #1, dim 
     
         # For encoder
         self.conv1 = torch.nn.Conv2d(1, 16, kernel_size=5, stride=2)
@@ -377,20 +389,21 @@ class Latent_CNN_VAE(torch.nn.Module):
 
         #now setup D
         d = torch.exp(d) #d has to be pos
-        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
-        D = torch.diag_embed(d) #bs,dim,dim
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
-        
-        return mu, L_tril         
+        d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
+        d = torch.diag_embed(d) #bs,dim,dim
+        return mu, d, L
+          
         
     def rsample(self, x):
-        mu, Ltril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=Ltril)
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         return z #bs, dim   
     
     def forward(self, x):
-        mu, L_tril = self.encode(x)
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
         latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         
@@ -1013,12 +1026,15 @@ class  VFMToyNet(torch.nn.Module):
                  width_mlp = 64, # number of hidden units (for each layer) of MLPs used in flow/dynamics nets.
                  cd_eps = 1e-5, #max variance allowed for compressed dimensions in encoder output. 
                  img_size = 32, #size for img, if using balls or other img toy.
-                 in_ch=1 #input channel if using toy img data.
+                 in_ch=1, #input channel if using toy img data.
+                 d_min=1e-10, #min value to cap D across all dimensions
+                 save_dir='' #dir where chol errors (if present) should be saved to. 
                  ):
         super().__init__()
         self.data_dim = data_dim
         self.dims_to_keep = dims_to_keep
         self.model_type = model_type
+        self.save_dir=save_dir
         
         #create u,v nets 
         assert model_type in ["ToyConvUNet", "ToyMLP"]
@@ -1034,40 +1050,55 @@ class  VFMToyNet(torch.nn.Module):
         if encoder_type == "Latent_MLP_VAE": 
             self.encoder = globals()[encoder_type](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
-                                                  hidden_size=width_encoder, eps=cd_eps) 
+                                                  hidden_size=width_encoder, eps=cd_eps, d_min=d_min) 
         else: 
-            self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps) 
+            self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
+                                                   d_min=d_min) 
         
                 
     def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher): 
         
-        #get x0_0, xdt_0 
-        x0_0 = self.encoder.rsample(x0_1)
-        xdt_0 = self.encoder.rsample(xdt_1)
-        
-        #get x0_tau, u0_tau; xdt_tau
-        _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
-        _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)        
-        
-        
-        #get xt_tau, ut_tau 
-        _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
-        
-        #now get net estimates for u, v 
-        u = self.unet_model(x0_tau, taus)
-        v = self.vnet_model(xt_tau, taus) 
-        
-        #get components of Lie Loss that require grad calc
-        taus.requires_grad=True
-        
-        vnet_jac = torch.autograd.functional.jacobian(self.vnet_model, (xt_tau, taus))
-        nabla_v = torch.sum(vnet_jac[0], dim=2).transpose(2,1) #bs, d, d
-        partial_tau_v = torch.sum(vnet_jac[1], dim=2) #bs,d 
-        
-        unet_jac = torch.autograd.functional.jacobian(self.unet_model, (x0_tau, taus))
-        nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
+        try: 
+            #rsample from MVN is possible
+            #and use samples to compute fwd loss 
+            x0_0 = self.encoder.rsample(x0_1) 
+            xdt_0 = self.encoder.rsample(xdt_1)
+            #get x0_tau, u0_tau; xdt_tau
+            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)        
         
         
-        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v 
+            #get xt_tau, ut_tau 
+            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
+        
+            #now get net estimates for u, v 
+            u = self.unet_model(x0_tau, taus)
+            v = self.vnet_model(xt_tau, taus) 
+        
+            #get components of Lie Loss that require grad calc
+            taus.requires_grad=True
+        
+            vnet_jac = torch.autograd.functional.jacobian(self.vnet_model, (xt_tau, taus))
+            nabla_v = torch.sum(vnet_jac[0], dim=2).transpose(2,1) #bs, d, d
+            partial_tau_v = torch.sum(vnet_jac[1], dim=2) #bs,d 
+        
+            unet_jac = torch.autograd.functional.jacobian(self.unet_model, (x0_tau, taus))
+            nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
+        
+        
+            return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v 
+        
+        except: 
+            #if chol fails during rsampling, get d, L, mu and save these 
+            #program will crash, but at least we save vals that don't work... 
+            mu0, d0, L0 = self.encoder.encode(x0_1)
+            mudt, ddt, Ldt = self.encoder.encode(xdt_1)
+            np.savez(os.path.join(self.save_dir, 'cholesky_error_outputs.npz'), \
+                     mu0=mu0.detach().cpu().numpy(), mudt= mudt.detach().cpu().numpy(), d0=d0.detach().cpu().numpy(), \
+                        ddt=ddt.detach().cpu().numpy(), L0=L0.detach().cpu().numpy(), Ldt=Ldt.detach().cpu().numpy())
+            return 
+            
+            
+
     
     

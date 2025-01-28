@@ -49,6 +49,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                         type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
 @click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
 @click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
+@click.option('--d_min',                   help='Minimum variance for any/all dimensions in LS. Used to sample x0s.', metavar='FLOAT',                     type=float, default=1e-15, show_default=True)
+
 
 #Arch Options
 @click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
@@ -147,7 +149,7 @@ def main(**kwargs):
     
     c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps, \
                             depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width, img_size=opts.data_imgshape, in_ch=opts.data_inch, \
-                                encoder_type=opts.encoder_arch)
+                                encoder_type=opts.encoder_arch, d_min=opts.d_min)
         
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
@@ -218,6 +220,7 @@ def main(**kwargs):
     dist.print0('Creating output directory...')
     if dist.get_rank() == 0:
         os.makedirs(c.run_dir, exist_ok=True)
+        c.network_kwargs.update(save_dir=c.run_dir) #add save_dir to network kwargs 
         with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
             json.dump(c, f, indent=2)
         dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
