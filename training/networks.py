@@ -335,6 +335,7 @@ class Latent_MLP_VAE(torch.nn.Module):
     
 #---------------------------------------------------------------------------
 
+#smaller Latent CNN VAE 
 @persistence.persistent_class
 class Latent_CNN_VAE(torch.nn.Module):
     def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-10):
@@ -412,6 +413,96 @@ class Latent_CNN_VAE(torch.nn.Module):
         kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
         
         return z,-kl_term
+
+
+#larger Latent CNN VAE 
+@persistence.persistent_class
+class Latent_LargeCNN_VAE(torch.nn.Module):
+
+  def __init__(self, channels=[32, 64, 128, 256], img_size=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-15):
+    super().__init__()
+    
+    #set up general attributes
+    self.input_dim = img_ch*img_size**2
+    self.img_size=img_size
+    self.img_ch=img_ch
+
+    #set d_max tensor
+    if dims_to_keep < self.input_dim: 
+        d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+        d_max_cds = torch.ones(self.input_dim - dims_to_keep).unsqueeze(0) * eps 
+        self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
+    else: 
+        self.d_max_diag = torch.ones(self.input_dim).unsqueeze(0) #1, dim 
+
+    #set d_min tensor
+    self.d_min_diag = torch.ones(self.input_dim).unsqueeze(0)*d_min #1, dim 
+
+    # Conv layers with decreasing res 
+    self.conv1 = torch.nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
+    self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+    self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
+    self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
+    self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+    self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
+    self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3])    
+
+    #Linear Layers to extract mu, d, u
+    self.mu = torch.nn.Linear(256*2*2, self.input_dim)
+    self.d = torch.nn.Linear(256*2*2, self.input_dim)
+    self.u = torch.nn.Linear(256*2*2, self.input_dim)  
+  
+  def encode(self, x): 
+    # Reshape flattened array 
+    x = x.reshape(-1, self.img_ch, self.img_size, self.img_size)
+   
+    # Encoder Conv/Gnorm BLocks
+    h1 = silu(self.gnorm1(self.conv1(x)))
+    h2 = silu(self.gnorm2(self.conv2(h1)))
+    h3 = silu(self.gnorm3(self.conv3(h2)))
+    h4 = silu(self.gnorm4(self.conv4(h3)))
+
+    #Extract mu, d, u
+    mu = self.mu(h4.reshape(x.shape[0], -1))
+    d = self.d(h4.reshape(x.shape[0], -1))
+    u = self.u(h4.reshape(x.shape[0], -1))
+
+    #Compute desired D, L matrices  
+    #L = uu^\top 
+    u = u.unsqueeze(-1) 
+    L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1))
+    #force L to be lower triangular
+    L = torch.tril(L)        
+    #force diagonals of L to be == 1 
+    L_diag = torch.diagonal(L, dim1=-2, dim2=-1)
+    L_diag_ones = torch.ones(L_diag.shape).to(x.device)
+    L -= torch.diag_embed(L_diag) #remove original diagonal 
+    L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+
+    #D=exp(d), clamped by eps, d_min
+    d = torch.exp(d)
+    d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device))
+    d = torch.diag_embed(d) 
+
+    #return encoder mean, d, L
+    return mu, d, L 
+    
+  def rsample(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      return z   
+    
+  def forward(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+      kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
+      return z,-kl_term
 
 
 #----------------------------------------------------------------------------
@@ -1018,40 +1109,45 @@ class  VFMToyNet(torch.nn.Module):
                  conv_embed_dim = 256,  # Dimensionality for Gaussian random feature embeddings for conv layers
                  data_dim=2, #dimensionality of data we will feed through Net 
                  dims_to_keep = 2, #number of nominal dimensions encoder should preserve 
-                 model_type = "ToyConvUNet", #class name for underlying model
-                 encoder_type = "Latent_MLP_VAE",
+                 dyn_model_type = "ToyConvUNet", #class name for underlying model
+                 flow_model_type = "ToyConvUNet",
+                 encoder_type = "Latent_LargeCNN_VAE",
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
                  width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
                  depth_mlp = 2,  # number of hidden layers for MLPs used for flow and dyn nets
                  width_mlp = 64, # number of hidden units (for each layer) of MLPs used in flow/dynamics nets.
                  cd_eps = 1e-5, #max variance allowed for compressed dimensions in encoder output. 
-                 img_size = 32, #size for img, if using balls or other img toy.
+                 img_size = 28, #size for img, if using balls or other img toy.
                  in_ch=1, #input channel if using toy img data.
-                 d_min=1e-10, #min value to cap D across all dimensions
+                 d_min=1e-15, #min value to cap D across all dimensions
                  save_dir='' #dir where chol errors (if present) should be saved to. 
                  ):
         super().__init__()
         self.data_dim = data_dim
         self.dims_to_keep = dims_to_keep
-        self.model_type = model_type
         self.save_dir=save_dir
         
-        #create u,v nets 
-        assert model_type in ["ToyConvUNet", "ToyMLP"]
-        if model_type=="ToyConvUNet":
-            self.unet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch)
-            self.vnet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch) 
+        #create u net 
+        if flow_model_type=="ToyConvUNet":
+            self.unet_model = globals()[flow_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch)
         else:
-            self.unet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
-            self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+            self.unet_model = globals()[flow_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+        
+        #create vnet 
+        if dyn_model_type == "ToyConvUNet":
+            self.vnet_model = globals()[dyn_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch)
+        else:
+            self.vnet_model = globals()[dyn_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create encoder net 
-        assert encoder_type in ["Latent_MLP_VAE", "Latent_CNN_VAE"]
         if encoder_type == "Latent_MLP_VAE": 
             self.encoder = globals()[encoder_type](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
                                                   hidden_size=width_encoder, eps=cd_eps, d_min=d_min) 
-        else: 
+        elif encoder_type == 'Latent_LargeCNN_VAE':
+            self.encoder = globals()[encoder_type](channels=channels, img_size=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
+                                                   d_min=d_min) 
+        else:
             self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
                                                    d_min=d_min) 
         

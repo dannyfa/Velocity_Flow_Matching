@@ -98,8 +98,10 @@ class EDMLoss:
 class VFMToyLoss:
     def __init__(self,
                  flow_matcher_type='exactot', 
-                 sigma=0.1):
+                 sigma=0.1, 
+                 normalize_lie=False):
         
+        self.normalize_lie = normalize_lie
         #get flow matcher for u 
         assert flow_matcher_type in ['exactot', 'regular']
         
@@ -119,11 +121,18 @@ class VFMToyLoss:
     
     def calc_lie_derivative(self, u, v, nabla_u, nabla_v, partial_tau_v):
         
-        # calc whole Lie derivative 
+        # calc whole (un-normalized) Lie derivative 
         # \partial_tau_v + u \cdot \nabla_v - v \cdot \nabla_u 
         lie_derivative = partial_tau_v #bs, dim
         lie_derivative += torch.einsum('bij, bjk -> bik', u.unsqueeze(1), nabla_v).squeeze(1) #bs, dim
         lie_derivative -= torch.einsum('bij, bjk -> bik', v.unsqueeze(1), nabla_u).squeeze(1) #bs, dim 
+        
+        #if desired, normalize it by L2 norms of u, v
+        if self.normalize_lie:
+            norm_u = torch.linalg.norm(u, ord=2, dim=-1) #bs 
+            norm_v = torch.linalg.norm(v, ord=2, dim=-1) #bs 
+            lie_derivative /= (norm_u * norm_v)[:, None]
+            
         return lie_derivative
         
                 

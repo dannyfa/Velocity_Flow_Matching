@@ -53,8 +53,9 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 
 
 #Arch Options
-@click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
-@click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE',                       type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE']), default='Latent_MLP_VAE', show_default=True)
+@click.option('--dyn_arch',                help='Dynamics net arch to use.', metavar='ToyConvUNet|ToyMLP',                                                 type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
+@click.option('--flow_arch',               help='Flow net arch to use.', metavar='ToyConvUNet|ToyMLP',                                                     type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
+@click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE|Latent_LargeCNN_VAE',   type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE', 'Latent_LargeCNN_VAE']), default='Latent_MLP_VAE', show_default=True)
 @click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
 @click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
 @click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
@@ -73,6 +74,7 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                              type=float, default=1.0, show_default=True)
 @click.option('--grad_clip',              help='Whether or not to clip model gradient norm.',                                                              is_flag=True)
 @click.option('--grad_clip_val',          help='Max value model gradients should be clipped to.', metavar='FLOAT',                                         type=float, default=1.0, show_default=True)
+@click.option('--norm_lie',               help='Whether or not to normalize Lie derivative.',                                                              is_flag=True)
 
 
 # Performance-related.
@@ -133,23 +135,14 @@ def main(**kwargs):
     
     #setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
-                                        sigma=opts.sigma_fm, class_name='training.loss.VFMToyLoss')
+                                        sigma=opts.sigma_fm, normalize_lie=opts.norm_lie, class_name='training.loss.VFMToyLoss')
     
-    #setup net kwargs 
-    if opts.arch == "ToyConvUNet": 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], conv_embed_dim=256, \
-                                               data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                                   class_name='training.networks.VFMToyNet') 
-    elif opts.arch=='ToyMLP': 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                           class_name='training.networks.VFMToyNet')
-
-    else:
-        raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
-    
-    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps, \
-                            depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width, img_size=opts.data_imgshape, in_ch=opts.data_inch, \
-                                encoder_type=opts.encoder_arch, d_min=opts.d_min)
+    #setup network kwargs
+    #here, I pass all args, for all possible arches. some of these may not be used depending on arch choices... 
+    c.network_kwargs = dnnlib.EasyDict(dyn_model_type=opts.dyn_arch, flow_model_type=opts.flow_arch, encoder_type=opts.encoder_arch, channels=[32, 64, 128, 256], conv_embed_dim=256, \
+                            data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width, depth_encoder=opts.encoder_depth, \
+                                width_encoder=opts.encoder_width, cd_eps=opts.eps, d_min=opts.d_min, img_size=opts.data_imgshape, in_ch=opts.data_inch, class_name='training.networks.VFMToyNet')
+                                
         
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
@@ -180,7 +173,7 @@ def main(**kwargs):
 
     # Description string.
     schedule_type_str = 'prp' if working_data_dim == opts.dims_to_keep else 'prr' 
-    desc = f'{opts.data_name}-{schedule_type_str}-uncond-{opts.arch}-{opts.flow_matcher_type}FM-gpus{dist.get_world_size():d}-batch{c.batch_size:d}-fp32'
+    desc = f'{opts.data_name}-{schedule_type_str}-uncond-{opts.flow_matcher_type}FM-gpus{dist.get_world_size():d}-batch{c.batch_size:d}-fp32'
 
     if opts.desc is not None:
         desc += f'-{opts.desc}'
