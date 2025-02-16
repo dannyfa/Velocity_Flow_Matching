@@ -781,7 +781,38 @@ def plot_encoded_trajs(gt_traj, encoded_traj, imgshape):
     gt_fig = plot_balls_traj(gt_traj.reshape(-1, imgshape, imgshape, 1))
     enc_fig = plot_balls_traj(encoded_traj.reshape(-1, imgshape, imgshape, 1))
     return gt_fig, enc_fig 
-    
+
+#------------------------------------------------------------------------------#
+
+# Methods to sim dynamics trajectories using simple SDEs
+
+def get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt):
+    """
+    Computes dx for a single Euler-Marayuma update step.
+    """
+    dyn_net_wrapper = dyn_torch_wrapper(dyn_net, flow_time)
+    f = dyn_net_wrapper(flow_time, curr_x) #bs, dim 
+    g = sigma * torch.eye(curr_x.shape[1]).type(torch.float32).to(curr_x.device) #dim, dim
+    dW = torch.randn(curr_x.shape).type(torch.float32).to(curr_x.device)*np.sqrt(dt) #bs, dim 
+    g_dW = torch.einsum('ij, bjk -> bik', g, dW.unsqueeze(-1)).squeeze(-1) #bs, dim
+    dx = f*dt + g_dW
+    return dx
+
+
+def int_dyn_SDE(init_x, dyn_net, flow_time, sigma, start_time, end_time, dt):
+    """
+    Simulates SDE from start time to end time, at dt steps
+    Uses dx defined above.
+    """
+    times = torch.arange(start_time, end_time, step=dt)
+    int_trajs = []
+    curr_x = init_x #bs, dim 
+    int_trajs.append(init_x.cpu().numpy())
+    for t in range(times.shape[0]):
+        dx = get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt)
+        curr_x += dx
+        int_trajs.append(curr_x.cpu().numpy())
+    return int_trajs
     
 #------------------------------------------------------------------------------#
 
