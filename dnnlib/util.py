@@ -332,6 +332,7 @@ class DoubleSDEOrbit(ToyData):
         self.omega,self.center1,self.center2 = coeffs
         self.mass=mass
         self.gen = np.random.default_rng(seed=seed)
+        self.vel = []
 
     def f(self,x,t):
         r1,theta1 = self._cartesian_to_polar(self.center1-x)
@@ -356,9 +357,12 @@ class DoubleSDEOrbit(ToyData):
         theta = np.arctan2(xy[1],xy[0])
         return r,theta
 
-    def init_conditions(self):
+    def init_conditions(self,init_xy = []):
 
-        init_xy = self.gen.multivariate_normal(mean=[0,0],cov=np.array([[0,0],[0,2]]))
+        if len(init_xy) == 0:
+
+            init_xy = self.gen.multivariate_normal(mean=[0,0],cov=np.array([[0,0],[0,2]]))
+        
         if init_xy[0] < 0:
             r1,theta1 = self._cartesian_to_polar(init_xy - self.center1)
             omega = self.omega
@@ -370,8 +374,10 @@ class DoubleSDEOrbit(ToyData):
         
         return init_xy
 
-    def dx(self,x,t,dt,sigma):
+    def dx(self,x,t,dt,sigma,new_init=False):
 
+        if len(self.vel) == 0 or new_init:
+            self.init_conditions(x)
         
         dv = self.f(x,t)*dt
         
