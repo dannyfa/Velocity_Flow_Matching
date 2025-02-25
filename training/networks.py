@@ -1299,27 +1299,29 @@ class  VFMToyNet(torch.nn.Module):
         self.save_dir=save_dir
         
         #create u net 
-        if flow_model_type=="ToyConvUNet" or "Adapted_ToyConvUNet":
+        if flow_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
             self.unet_model = globals()[flow_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
                                                          input_size=data_dim)
         else:
             self.unet_model = globals()[flow_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create vnet 
-        if dyn_model_type == "ToyConvUNet" or "Adapted_ToyConvUNet":
+        if dyn_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
             self.vnet_model = globals()[dyn_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
                                                         input_size=data_dim)
         else:
             self.vnet_model = globals()[dyn_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create encoder net 
-        if encoder_type == "Latent_MLP_VAE": 
+        if encoder_type in ['Latent_LargeCNN_VAE', "Adapted_Latent_LargeCNN_VAE"]:
+            self.encoder = globals()[encoder_type](channels=channels, img_size=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
+                                                   d_min=d_min, input_size=data_dim) 
+
+        elif encoder_type == "Latent_MLP_VAE": 
             self.encoder = globals()[encoder_type](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
                                                   hidden_size=width_encoder, eps=cd_eps, d_min=d_min) 
-        elif encoder_type == 'Latent_LargeCNN_VAE' or "Adapted_Latent_LargeCNN_VAE":
-            self.encoder = globals()[encoder_type](channels=channels, img_size=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
-                                                   d_min=d_min, input_size=data_dim) 
+
         else:
             self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
                                                    d_min=d_min) 
