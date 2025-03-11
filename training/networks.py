@@ -1329,14 +1329,17 @@ class  VFMToyNet(torch.nn.Module):
                 
     def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher, pre_training=False):
         if pre_training:
-            #get proposal from encoder (for t==0 only here)
+            #get proposals from encoder 
             x0_0 = self.encoder.rsample(x0_1)
-            #get compression flow interpolated form 
+            xdt_0 = self.encoder.rsample(xdt_1) 
+            
+            #get compression flow interpolated forms
             _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+            
             #get dynamics flow interpolated form 
-            #this is only over tau==1 
-            #note that this already add a tiny amount of noise to interpolated forms 
-            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_1, xdt_1, t=(ts/dt))
+            #this is over all taus, we just don't enforce Lie yet 
+            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
             ## now get u, v
             u = self.unet_model(x0_tau, taus)
             v = self.vnet_model(xt_tau, taus) 
