@@ -47,7 +47,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 
 #FM options
 @click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                                              type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
-@click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                                            type=float, default=0.1, show_default=True)
+@click.option('--sigma_dyn_fm',            help='Sigma val for dynamics flow matcher class', metavar='FLOAT',                                                                   type=float, default=0.1, show_default=True)
+@click.option('--sigma_comp_fm',           help='Sigma val for compression flow matcher class', metavar='FLOAT',                                                                type=float, default=0.1, show_default=True)
 @click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                                               type=float, default=1.0, show_default=True)
 @click.option('--d_min',                   help='Minimum variance for any/all dimensions in LS. Used to sample x0s.', metavar='FLOAT',                                          type=float, default=1e-15, show_default=True)
 
@@ -72,9 +73,12 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--alpha',                  help='Scale for flow net component of loss', metavar='FLOAT',                                                                         type=float, default=1.0, show_default=True)
 @click.option('--beta',                   help='Scale for dynamics net component of loss', metavar='FLOAT',                                                                     type=float, default=1.0, show_default=True)
 @click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                                                   type=float, default=1.0, show_default=True)
+@click.option('--eta',                    help='Scale for encoder reconstruction component of loss', metavar='FLOAT',                                                           type=float, default=1.0, show_default=True)
 @click.option('--grad_clip',              help='Whether or not to clip model gradient norm.',                                                                                   is_flag=True)
 @click.option('--grad_clip_val',          help='Max value model gradients should be clipped to.', metavar='FLOAT',                                                              type=float, default=1.0, show_default=True)
 @click.option('--norm_lie',               help='Whether or not to normalize Lie derivative.',                                                                                   is_flag=True)
+@click.option('--pre_train',              help='Whether or not to pre-train nets.',                                                                                             is_flag=True)
+@click.option('--pre_train_kimgs',        help='Number of Kimgs to pre-train nets for', metavar='INT',                                                                          type=int, default=0, show_default=True)
 
 
 # Performance-related.
@@ -135,7 +139,8 @@ def main(**kwargs):
     
     #setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
-                                        sigma=opts.sigma_fm, normalize_lie=opts.norm_lie, class_name='training.loss.VFMToyLoss')
+                                        sigma_dynamics=opts.sigma_dyn_fm, sigma_compression=opts.sigma_comp_fm, \
+                                            normalize_lie=opts.norm_lie, class_name='training.loss.VFMToyLoss')
     
     #setup network kwargs
     #here, I pass all args, for all possible arches. some of these may not be used depending on arch choices... 
@@ -151,8 +156,9 @@ def main(**kwargs):
     c.update(batch_size=opts.batch, batch_gpu=opts.batch_gpu)
     c.update(loss_scaling=opts.ls, cudnn_benchmark=opts.bench)
     c.update(kimg_per_tick=opts.tick, snapshot_ticks=opts.snap, state_dump_ticks=opts.dump)
-    c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma)
+    c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma, eta=opts.eta)
     c.update(grad_clip=opts.grad_clip, grad_clip_val=opts.grad_clip_val)
+    c.update(pre_train=opts.pre_train, pre_train_kimgs=opts.pre_train_kimgs)
     
     # Random seed.
     if opts.seed is not None:
