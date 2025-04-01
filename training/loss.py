@@ -144,15 +144,17 @@ class VFMToyLoss:
         ts = torch.rand(xdt_1.shape[0], device=xdt_1.device) * dt #\t \sim U[0, dt]
         
         #pass these to net obj
-        u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0 = net(x0_1, xdt_1, taus, ts, dt, \
+        u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0, xdt_0 = net(x0_1, xdt_1, taus, ts, dt, \
                                                                     self.tau_flowmatcher, self.t_flowmatcher, pre_training=pre_training)
         
         #calc different loss pieces 
         
-        #flow, dyn, enc losses 
+        #flow, dyn losses
         flow_loss = (u - u0_tau)**2 #bs, dim
         dyn_loss = (v - ut_tau) **2 #bs, dim
-        enc_loss = (x0_0 - x0_1)**2 #bs, dim 
+        
+        #new PT loss -- this is equivalent to conditional Lie we computed.. 
+        enc_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2 #bs, dim 
         
         if pre_training:
             #set lie loss to zero -- we are NOT computing Lie regularizer yet 

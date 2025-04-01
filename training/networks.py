@@ -1384,7 +1384,7 @@ class  VFMToyNet(torch.nn.Module):
             nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
         
         
-        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0 
+        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0, xdt_0 
             
             
 
