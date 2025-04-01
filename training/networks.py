@@ -390,8 +390,10 @@ class Latent_MLP_VAE(torch.nn.Module):
         mu, d, L = self.encode(x)
         L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
         
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril) 
-        z = latent_dist.rsample() 
+        eps = torch.randn(mu.shape).to(mu.device)
+        z = mu + eps 
+        z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+
         return z
 
         
@@ -475,9 +477,12 @@ class Latent_CNN_VAE(torch.nn.Module):
     def rsample(self, x):
         mu, d, L = self.encode(x)
         L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
-        z = latent_dist.rsample()
-        return z #bs, dim   
+        
+        eps = torch.randn(mu.shape).to(mu.device)
+        z = mu + eps 
+        z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+
+        return z
     
     def forward(self, x):
         mu, d, L = self.encode(x)
@@ -568,9 +573,12 @@ class Latent_LargeCNN_VAE(torch.nn.Module):
   def rsample(self, x):
       mu, d, L = self.encode(x)
       L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
-      latent_dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=L_tril)
-      z = latent_dist.rsample()
-      return z   
+        
+      eps = torch.randn(mu.shape).to(mu.device)
+      z = mu + eps 
+      z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+
+      return z 
     
   def forward(self, x):
       mu, d, L = self.encode(x)
@@ -663,9 +671,12 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
   def rsample(self, x):
       mu, d, L = self.encode(x)
       L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
-      latent_dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=L_tril)
-      z = latent_dist.rsample()
-      return z   
+        
+      eps = torch.randn(mu.shape).to(mu.device)
+      z = mu + eps 
+      z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+
+      return z
     
   def forward(self, x):
       mu, d, L = self.encode(x)
