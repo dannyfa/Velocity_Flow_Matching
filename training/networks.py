@@ -330,6 +330,8 @@ class ToyMLP(torch.nn.Module):
 #----------------------------------------------------------------------------
 #MLP Encoder 
 #Can be used for any toy type!!
+
+#MLP VAE case is tested/works fine 
 @persistence.persistent_class
 class Latent_MLP_VAE(torch.nn.Module):
     
@@ -337,26 +339,19 @@ class Latent_MLP_VAE(torch.nn.Module):
 
         super().__init__()
 
-        mu = [torch.nn.Linear(input_size,hidden_size,bias=True), torch.nn.ReLU()]
-        u = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
-        d = [torch.nn.Linear(input_size,hidden_size,bias=True),torch.nn.ReLU()]
-
-        
+        #construct mu net -- this is still locally param
+        mu = [torch.nn.Linear(input_size,hidden_size,bias=True), torch.nn.ReLU()] 
         for _ in range(num_hidden):
             mu.append(torch.nn.Linear(hidden_size,hidden_size))
             mu.append(torch.nn.ReLU())
-            u.append(torch.nn.Linear(hidden_size,hidden_size))
-            u.append(torch.nn.ReLU())
-            d.append(torch.nn.Linear(hidden_size,hidden_size))
-            d.append(torch.nn.ReLU())
-            
         mu.append(torch.nn.Linear(hidden_size,output_size))
-        u.append(torch.nn.Linear(hidden_size,output_size))
-        d.append(torch.nn.Linear(hidden_size,output_size))
+
 
         self.mu = torch.nn.Sequential(*mu)
-        self.u = torch.nn.Sequential(*u)
-        self.d = torch.nn.Sequential(*d)
+        
+        #now construct GLOBAL u, D parameters 
+        self.u = torch.nn.Parameter(torch.randn(output_size)) #dim 
+        self.d = torch.nn.Parameter(torch.randn(output_size)) #dim 
         
         if dims_to_keep < output_size: 
             d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
@@ -370,29 +365,33 @@ class Latent_MLP_VAE(torch.nn.Module):
         self.d_min_diag = torch.ones(output_size).unsqueeze(0)*d_min #1, dim 
         
     def encode(self, x):
-        mu,u, d = self.mu(x),self.u(x),self.d(x)
-        u = u.unsqueeze(-1) #bs,dim,1
-        L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1)) #bs, dim, dim 
-        L = torch.tril(L) #force L to be lower triangular (bs, dim, dim)
+        
+        mu = self.mu(x) #bs, dim 
+        #set up L from global param u 
+        u = self.u.unsqueeze(-1) #dim,1
+        L = torch.einsum('ij, jk -> ik', u, torch.transpose(u, 1, 0)) #dim, dim
+        L = torch.tril(L) #force L to be lower triangular (dim, dim)
         #now force diagonals of L to be == 1 
-        L_diag = torch.diagonal(L, dim1=-2, dim2=-1) #bs, dim
-        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #bs, dim
+        L_diag = torch.diagonal(L, dim1=0, dim2=1) #dim 
+        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #dim
         L -= torch.diag_embed(L_diag) #remove original diagonal 
         L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
-        #now setup D
-        d = torch.exp(d) #d has to be pos
+        
+        #now setup D from global param d 
+        d = torch.exp(self.d) #dim 
         d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
-        d = torch.diag_embed(d) #bs,dim,dim
+        d = torch.diag_embed(d).squeeze(0) #dim, dim 
+        
         return mu, d, L
 
     
     def rsample(self, x):
         mu, d, L = self.encode(x)
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        L_tril = torch.einsum('ij, jk -> ik', L, torch.sqrt(d))
         
         eps = torch.randn(mu.shape).to(mu.device)
         z = mu + eps 
-        z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+        z = torch.einsum('ij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
 
         return z
 
@@ -415,6 +414,7 @@ class Latent_MLP_VAE(torch.nn.Module):
 
 #CNN Encoder Arches for Image Toys
 
+#needs testing on balls data 
 @persistence.persistent_class
 class Latent_CNN_VAE(torch.nn.Module):
     def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-10):
@@ -436,13 +436,15 @@ class Latent_CNN_VAE(torch.nn.Module):
         #this is just to avoid chol from failing as model trains 
         self.d_min_diag = torch.ones(self.input_dim).unsqueeze(0)*d_min #1, dim 
     
-        # For encoder
+        # For mean encoder
         self.conv1 = torch.nn.Conv2d(1, 16, kernel_size=5, stride=2)
         self.conv2 = torch.nn.Conv2d(16, 32, kernel_size=5, stride=2)
         self.linear1 = torch.nn.Linear(32*4*4,300)
         self.mu = torch.nn.Linear(300, self.latent_size)
-        self.u = torch.nn.Linear(300, self.latent_size)
-        self.d = torch.nn.Linear(300, self.latent_size)
+        
+        # Add global parameters 
+        self.u = torch.nn.Parameter(torch.randn(self.input_dim))
+        self.d = torch.nn.Parameter(torch.randn(self.input_dim))
 
     def encode(self,x):
         #get mu, u, d 
@@ -453,34 +455,32 @@ class Latent_CNN_VAE(torch.nn.Module):
         
         t = torch.nn.functional.relu(self.linear1(t))
         mu = self.mu(t)
-        u = self.u(t)
-        d = self.d(t)
 
         #get Ltril mat 
-        u = u.unsqueeze(-1) #bs, dim, 1
-        L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1)) #bs, dim, dim 
-        L = torch.tril(L) #force L to be lower triangular (bs, dim, dim)        
+        u = self.u.unsqueeze(-1) # dim, 1
+        L = torch.einsum('ij, jk -> ik', u, torch.transpose(u, 1, 0)) #dim, dim 
+        L = torch.tril(L) #force L to be lower triangular (dim, dim)        
         
         #now force diagonals of L to be == 1 
-        L_diag = torch.diagonal(L, dim1=-2, dim2=-1) #bs, dim
-        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #bs, dim
+        L_diag = torch.diagonal(L, dim1=0, dim2=1) #dim
+        L_diag_ones = torch.ones(L_diag.shape).to(x.device) #dim 
         L -= torch.diag_embed(L_diag) #remove original diagonal 
-        L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+        L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones , dimxdim 
 
         #now setup D
-        d = torch.exp(d) #d has to be pos
+        d = torch.exp(self.d) #d has to be pos
         d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
-        d = torch.diag_embed(d) #bs,dim,dim
+        d = torch.diag_embed(d).squeeze(0) #dim,dim
         return mu, d, L
           
         
     def rsample(self, x):
         mu, d, L = self.encode(x)
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        L_tril = torch.einsum('ij, jk -> ik', L, torch.sqrt(d))
         
         eps = torch.randn(mu.shape).to(mu.device)
         z = mu + eps 
-        z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+        z = torch.einsum('ij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
 
         return z
     
@@ -498,6 +498,7 @@ class Latent_CNN_VAE(torch.nn.Module):
 
 
 #slightly larger/more powerful arch 
+#also needs testing on balls data 
 @persistence.persistent_class
 class Latent_LargeCNN_VAE(torch.nn.Module):
 
@@ -530,10 +531,12 @@ class Latent_LargeCNN_VAE(torch.nn.Module):
     self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
     self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3])    
 
-    #Linear Layers to extract mu, d, u
+    #Linear Layers to extract mus
     self.mu = torch.nn.Linear(256*2*2, self.input_dim)
-    self.d = torch.nn.Linear(256*2*2, self.input_dim)
-    self.u = torch.nn.Linear(256*2*2, self.input_dim)  
+    
+    #add in global params
+    self.u = torch.nn.Parameter(torch.randn(self.input_dim))
+    self.d = torch.nn.Parameter(torch.randn(self.input_dim))
   
   def encode(self, x): 
     # Reshape flattened array 
@@ -547,36 +550,35 @@ class Latent_LargeCNN_VAE(torch.nn.Module):
 
     #Extract mu, d, u
     mu = self.mu(h4.reshape(x.shape[0], -1))
-    d = self.d(h4.reshape(x.shape[0], -1))
-    u = self.u(h4.reshape(x.shape[0], -1))
+
 
     #Compute desired D, L matrices  
     #L = uu^\top 
-    u = u.unsqueeze(-1) 
-    L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1))
+    u = self.u.unsqueeze(-1) #dim, 1
+    L = torch.einsum('ij, jk -> ik', u, torch.transpose(u, 1, 0)) #dim, dim 
     #force L to be lower triangular
     L = torch.tril(L)        
     #force diagonals of L to be == 1 
-    L_diag = torch.diagonal(L, dim1=-2, dim2=-1)
+    L_diag = torch.diagonal(L, dim1=0, dim2=1)
     L_diag_ones = torch.ones(L_diag.shape).to(x.device)
     L -= torch.diag_embed(L_diag) #remove original diagonal 
     L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
 
     #D=exp(d), clamped by eps, d_min
-    d = torch.exp(d)
+    d = torch.exp(self.d)
     d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device))
-    d = torch.diag_embed(d) 
+    d = torch.diag_embed(d).squeeze(0)
 
     #return encoder mean, d, L
     return mu, d, L 
     
   def rsample(self, x):
       mu, d, L = self.encode(x)
-      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      L_tril = torch.einsum('ij, jk -> ik', L, torch.sqrt(d))
         
       eps = torch.randn(mu.shape).to(mu.device)
       z = mu + eps 
-      z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+      z = torch.einsum('ij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
 
       return z 
     
@@ -589,8 +591,9 @@ class Latent_LargeCNN_VAE(torch.nn.Module):
       kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
       return z,-kl_term
 #----------------------------------------------------------------------------
-#version of LargeCNN Enc above for non-image toys
 
+#version of LargeCNN Enc above for non-image toys
+#needs testing on regular (non-image) toys ... 
 @persistence.persistent_class
 class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
   def __init__(self, channels=[32, 64, 128, 256], img_size=8, img_ch=1, input_size=2, dims_to_keep=2, eps=1.0, d_min=1e-15):
@@ -626,11 +629,12 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
     #general linear layer before extracting mu, d, u
     self.fc1 = torch.nn.Linear(128*2*2, 100)
       
-    #mu, u, d layers
+    #mu layer 
     self.mu = torch.nn.Linear(100, input_size)
-    self.d = torch.nn.Linear(100, input_size)
-    self.u = torch.nn.Linear(100, input_size)
     
+    #now add global params d, u
+    self.u = torch.nn.Parameter(torch.randn(self.input_size))
+    self.d = torch.nn.Parameter(torch.randn(self.input_size))    
     
   def encode(self, x): 
     # Apply up-sampling fc layer for x 
@@ -646,35 +650,33 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
     # Extract mu, u, d
     h4 = self.fc1(h3.reshape(x.shape[0], -1))
     mu = self.mu(h4)
-    d = self.d(h4)
-    u = self.u(h4)
 
     #Compute desired D, L matrices  
     #L = uu^\top 
-    u = u.unsqueeze(-1) 
-    L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1))
+    u = self.u.unsqueeze(-1) #dim, 1
+    L = torch.einsum('ij, jk -> ik', u, torch.transpose(u, 1, 0)) #dim, dim 
     #force L to be lower triangular
     L = torch.tril(L)        
     #force diagonals of L to be == 1 
-    L_diag = torch.diagonal(L, dim1=-2, dim2=-1)
+    L_diag = torch.diagonal(L, dim1=0, dim2=1)
     L_diag_ones = torch.ones(L_diag.shape).to(x.device)
     L -= torch.diag_embed(L_diag) #remove original diagonal 
     L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
 
     #D=exp(d), clamped by eps, d_min
-    d = torch.exp(d)
+    d = torch.exp(self.d)
     d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device))
-    d = torch.diag_embed(d) 
+    d = torch.diag_embed(d).squeeze(0) #dim, dim 
       
     return mu, d, L
 
   def rsample(self, x):
       mu, d, L = self.encode(x)
-      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      L_tril = torch.einsum('ij, jk -> ik', L, torch.sqrt(d))
         
       eps = torch.randn(mu.shape).to(mu.device)
       z = mu + eps 
-      z = torch.einsum('bij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
+      z = torch.einsum('ij, bjk -> bik', L_tril, z.unsqueeze(-1)).squeeze(-1)
 
       return z
     
