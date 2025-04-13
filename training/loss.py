@@ -145,7 +145,7 @@ class VFMToyLoss:
             
         else:
             #set reconstruction loss to zero 
-            enc_pt_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+            enc_pt_loss = (x0_1 - x0_0)**2 #bs, dim
             #compute conditional Lie loss 
             enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2 #bs, dim 
         
