@@ -1340,53 +1340,24 @@ class  VFMToyNet(torch.nn.Module):
                                                    d_min=d_min) 
         
                 
-    def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher, pre_training=False):
-        if pre_training:
-            #get proposals from encoder 
-            x0_0 = self.encoder.rsample(x0_1)
-            xdt_0 = self.encoder.rsample(xdt_1) 
+    def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher):
+        # pre-training routine will be implemented at level of loss fn 
+        # get proposals from encoder 
+        x0_0 = self.encoder.rsample(x0_1)
+        xdt_0 = self.encoder.rsample(xdt_1) 
             
-            #get compression flow interpolated forms
-            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
-            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+        #get compression flow interpolated forms
+        _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+        _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
             
-            #get dynamics flow interpolated form 
-            #this is over all taus, we just don't enforce Lie yet 
-            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
-            ## now get u, v
-            u = self.unet_model(x0_tau, taus)
-            v = self.vnet_model(xt_tau, taus) 
-            
-            #make all Lie related components zero (for now)
-            partial_tau_v = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
-            nabla_v = torch.zeros(x0_1.shape[0], x0_1.shape[1], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
-            nabla_u = torch.zeros(x0_1.shape[0], x0_1.shape[1], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+        #get dynamics flow interpolated form 
+        _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
         
-        else: 
-            #if DONE with pre-training 
-            x0_0 = self.encoder.rsample(x0_1)
-            xdt_0 = self.encoder.rsample(xdt_1) 
-            #get x0_tau, u0_tau; xdt_tau 
-            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus) 
-            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
-            
-            #get xt_tau, ut_tau 
-            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt)) 
-            
-            #now get net estimates for u, v  
-            u = self.unet_model(x0_tau, taus) 
-            v = self.vnet_model(xt_tau, taus) 
-            
-            #get components of Lie Loss that require grad calc 
-            taus.requires_grad=True 
-            vnet_jac = torch.autograd.functional.jacobian(self.vnet_model, (xt_tau, taus)) 
-            nabla_v = torch.sum(vnet_jac[0], dim=2).transpose(2,1) #bs, d, d 
-            partial_tau_v = torch.sum(vnet_jac[1], dim=2) #bs,d  
-            unet_jac = torch.autograd.functional.jacobian(self.unet_model, (x0_tau, taus)) 
-            nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
+        # now get u, v
+        u = self.unet_model(x0_tau, taus)
+        v = self.vnet_model(xt_tau, taus) 
         
-        
-        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0, xdt_0
+        return u0_tau, ut_tau, u, v, x0_0, xdt_0
             
             
 
