@@ -120,22 +120,6 @@ class VFMToyLoss:
         #this is always just regular flow matcher! 
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma_dynamics)
     
-    def calc_lie_derivative(self, u, v, nabla_u, nabla_v, partial_tau_v):
-        
-        # calc whole (un-normalized) Lie derivative 
-        # \partial_tau_v + u \cdot \nabla_v - v \cdot \nabla_u 
-        lie_derivative = partial_tau_v #bs, dim
-        lie_derivative += torch.einsum('bij, bjk -> bik', u.unsqueeze(1), nabla_v).squeeze(1) #bs, dim
-        lie_derivative -= torch.einsum('bij, bjk -> bik', v.unsqueeze(1), nabla_u).squeeze(1) #bs, dim 
-        
-        #if desired, normalize it by L2 norms of u, v
-        if self.normalize_lie:
-            norm_u = torch.linalg.norm(u, ord=2, dim=-1) #bs 
-            norm_v = torch.linalg.norm(v, ord=2, dim=-1) #bs 
-            lie_derivative /= (norm_u * norm_v)[:, None]
-            
-        return lie_derivative
-        
                 
     def __call__(self, net, x0_1, xdt_1, dt, pre_training=False):
         
@@ -144,26 +128,25 @@ class VFMToyLoss:
         ts = torch.rand(xdt_1.shape[0], device=xdt_1.device) * dt #\t \sim U[0, dt]
         
         #pass these to net obj
-        u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0, xdt_0 = net(x0_1, xdt_1, taus, ts, dt, \
-                                                                    self.tau_flowmatcher, self.t_flowmatcher, pre_training=pre_training)
+        u0_tau, ut_tau, u, v, x0_0, xdt_0 = net(x0_1, xdt_1, taus, ts, dt, \
+                                                self.tau_flowmatcher, self.t_flowmatcher)
         
-        #calc different loss pieces 
-        
-        #flow, dyn losses
+        #Get flow, dyn losses (these are present throughout PT and training)
         flow_loss = (u - u0_tau)**2 #bs, dim
         dyn_loss = (v - ut_tau) **2 #bs, dim
         
-        #new PT loss -- this is equivalent to conditional Lie we computed.. 
-        enc_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2 #bs, dim 
-        
         if pre_training:
-            #set lie loss to zero -- we are NOT computing Lie regularizer yet 
-            lie_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+            #compute reconstruction loss
+            enc_pt_loss = (u - u0_tau)**2 #bs, dim
+            #set Lie loss to zero 
+            enc_lie_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+        else:
+            #set reconstruction loss to zero
+            enc_pt_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+            #compute conditional Lie loss 
+            enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2 #bs, dim 
         
-        else: 
-            #lie loss
-            lie_loss = (self.calc_lie_derivative(u, v, nabla_u, nabla_v, partial_tau_v))**2 
         
-        return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), enc_loss.unsqueeze(0), \
-                          lie_loss.unsqueeze(0)], dim=0) # 4, bs, dim 
+        return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), enc_pt_loss.unsqueeze(0), \
+                          enc_lie_loss.unsqueeze(0)], dim=0) # 4, bs, dim 
         
