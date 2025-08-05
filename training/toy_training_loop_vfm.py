@@ -18,6 +18,7 @@ from torch_utils import distributed as dist
 from torch_utils import training_stats
 from torch_utils import misc
 from torch.utils.tensorboard import SummaryWriter
+from torch_cfm import conditional_flow_matching as cfm
 
 #----------------------------------------------------------------------------
 
@@ -48,8 +49,11 @@ def training_loop(
     alpha               = 1.0,      #scale for flow net loss 
     beta                = 1.0,      #scale for dynamics net loss
     gamma               = 1.0,      #scale for Lie derivative loss
+    eta                 = 1.0,      #scale for encoder loss 
     grad_clip           = False,    #whether or no to apply grad norm clipping to model params
     grad_clip_val       = None,     #val to clip model grad norms to.
+    pre_train           = False,    #whether or not to pre-train nets.
+    pre_train_kimgs     = 0,        # how many Kimgs to run pre-training for 
 ):
     # Initialize.
     start_time = time.time()
@@ -92,7 +96,8 @@ def training_loop(
         with torch.no_grad():
             images = torch.zeros([batch_gpu, net.data_dim], device=device)
             ts = torch.ones([batch_gpu], device=device)
-            misc.print_module_summary(net, [images, images, ts], max_nesting=2) #this might not print well (tbd)
+            test_flow_matcher = cfm.ConditionalFlowMatcher(sigma=0.1)
+            misc.print_module_summary(net, [images, images, ts, ts, 1e-3, test_flow_matcher, test_flow_matcher], max_nesting=2) #leave pre-training as False for test 
            
 
     # Setup optimizer and lossfn
@@ -136,6 +141,9 @@ def training_loop(
     dist.print0(f'Training for {total_kimg} kimg...')
     dist.print0()
     cur_nimg = resume_kimg * 1000
+    #make sure pre_train flag is correctly set if resuming exp
+    if (cur_nimg >= pre_train_kimgs * 1000):
+        pre_train=False 
     cur_tick = 0
     tick_start_nimg = cur_nimg
     tick_start_time = time.time()
@@ -143,27 +151,27 @@ def training_loop(
     dist.update_progress(cur_nimg // 1000, total_kimg)
     stats_jsonl = None
     gs = 0 
-    loss_scales = torch.Tensor([alpha, beta, gamma]).type(torch.float32).to(device)
+    loss_scales = torch.Tensor([alpha, beta, eta, gamma]).type(torch.float32).to(device)
     while True:
 
         # Accumulate gradients.
         optimizer.zero_grad(set_to_none=True)
         tot_scalar_loss = 0
-        tot_separate_losses = torch.zeros(3).type(torch.float32).to(device)
+        tot_separate_losses = torch.zeros(4).type(torch.float32).to(device)
         for round_idx in range(num_accumulation_rounds):
             with misc.ddp_sync(ddp, (round_idx == num_accumulation_rounds - 1)): 
                 x1s = next(dataset_iterator) 
                 #make sure data is of proper type, flattened, and on device 
                 x0_1, xdt_1 = x1s[0].type(torch.float32).reshape(x1s[0].shape[0], -1).to(device), \
                     x1s[1].type(torch.float32).reshape(x1s[1].shape[0], -1).to(device) 
-                loss = loss_fn(net=ddp, x0_1=x0_1, xdt_1=xdt_1, dt=dataset_kwargs.dt) #3, bs, dim
-                loss = loss * loss_scales[:, None, None] #3, bs, dim 
+                loss = loss_fn(net=ddp, x0_1=x0_1, xdt_1=xdt_1, dt=dataset_kwargs.dt, pre_training=pre_train) #4, bs, dim
+                loss = loss * loss_scales[:, None, None] #4, bs, dim 
                 #log in using original training stats - no grads here! 
                 training_stats.report('Loss/loss', torch.sum(loss.detach(), dim=0)) #bs, dim
                 #now sum over loss components, dims and take avg over batch items 
                 round_scalar_loss = loss.sum()*(loss_scaling/batch_gpu_total)
                 #get separate loss items too (for TB logging) -- do NOY prop. gradients here!
-                separate_losses = torch.sum(torch.sum(loss.detach(), dim=2), dim=1)*(loss_scaling/batch_gpu_total) #3 
+                separate_losses = torch.sum(torch.sum(loss.detach(), dim=2), dim=1)*(loss_scaling/batch_gpu_total) #4 
                 tot_separate_losses += separate_losses
                 #accumulate loss for rounds  
                 tot_scalar_loss += round_scalar_loss.item() 
@@ -202,12 +210,19 @@ def training_loop(
             writer.add_scalar('tot_train_loss', tot_scalar_loss, gs)
             writer.add_scalar('flow_train_loss', tot_separate_losses[0].item(), gs)
             writer.add_scalar('dyn_train_loss', tot_separate_losses[1].item(), gs)
-            writer.add_scalar('lie_derivative_loss', tot_separate_losses[2].item(), gs)
+            writer.add_scalar('enc_train_loss', tot_separate_losses[2].item(), gs)
+            writer.add_scalar('lie_derivative_loss', tot_separate_losses[3].item(), gs)
             writer.add_scalar('Kimgs', cur_nimg/1000, gs)
             gs+=1
 
         # Perform maintenance tasks once per tick.
         cur_nimg += batch_size
+        
+        #check if pre-training time is done... 
+        if (cur_nimg >= pre_train_kimgs * 1000):
+            pre_train = False
+        
+        
         done = (cur_nimg >= total_kimg * 1000)
         if (not done) and (cur_tick != 0) and (cur_nimg < tick_start_nimg + kimg_per_tick * 1000):
             continue
@@ -260,6 +275,17 @@ def training_loop(
             for tag, value in net.named_parameters():
                 if value.grad is not None:
                     writer.add_histogram(tag+"/grad", value.grad.cpu(), gs) 
+            #log encoded trajs, if working with balls dset
+            if dataset_kwargs.balls_dset_specs != None:
+                gt_trajs = np.array(dset_samples) #pass gt_trajs to numpy
+                gt_trajs = np.reshape(gt_trajs, (gt_trajs.shape[0], gt_trajs.shape[1], -1)) #flatten across img dims
+                orig_traj, enc_traj = dnnlib.util.sim_encoded_trajs(gt_trajs, net.encoder, device)
+                orig_fig, enc_fig = dnnlib.util.plot_encoded_trajs(orig_traj, enc_traj, \
+                                                                   dataset_kwargs.balls_dset_specs.img_shape[0])
+                
+                writer.add_figure("gt_traj", orig_fig, gs)
+                writer.add_figure("encoded_traj", enc_fig, gs)
+                writer.flush()
 
         # Update logs.
         training_stats.default_collector.update()
