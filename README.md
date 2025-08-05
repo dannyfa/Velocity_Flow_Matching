@@ -68,10 +68,18 @@ determined by both `--tps_per_tau` and `--num_taus`.
 
 ## Branch info/basics
 
+Most of the info you care about will be in the following 3 branches:
+
 `main` -- Contains original code with implementation of simple reconstruction-based pretraining loss (a.k.a. encoder loss) and using torch autograd functionality to compute Lie derivative loss ONLY AFTER a given pre-training number of Mimgs. We turned away from this due to how slow/costly it was to actually compute desired Jacobian vector product (JVP) using torch atugrad functionality.
 
 `global_new_param_new_pt` -- Updates to `main` to use instead conditional Lie derivative form we mentioned in notes (as opposed to autograd computed Lie derivative/JVP). Here parameterization of L and D is global, and only encoder/proposal means are locally parameterized.
 
 `local_new_param_new_pt` -- Updates to `main` to use instead conditional Lie derivative form we mentioned in notes (as opposed to autograd computed Lie derivative/JVP). Here L, D, and means are ALL locally parameterized.
 
-Of note, both `global_new_param_new_pt` and `local_new_param_new_pt` begin pre-training with flow net loss, dyn net loss, and simple encoder reconstruction loss. After specified pre-training number of Mimgs, conditional Lie loss component is added to global loss. This set up seems to be more stable from toy experiments I ran back in April/May. 
+Of note, both `global_new_param_new_pt` and `local_new_param_new_pt` begin pre-training with flow net loss, dyn net loss, and simple encoder reconstruction loss. After specified pre-training number of Mimgs, conditional Lie loss component is added to global loss. This set up seems to be more stable from toy experiments I ran back in April/May.
+
+You will also see:
+
+`JVP-Investigation` -- Contains some work an undergrad RA working with us on Spring did trying to optimize autograd computation of our desired JVP. This is obsolete at this point, so DO NOT WORRY ABOUT IT.
+
+`model_comparison` -- Branch containing some of the original notebooks Miles Martinez created to run models we will likely want to compare our vfm model against. Most of these nbs are now incorporated into `comparison_testing_notebooks` subdir under main so feel free to check these out. Miles will probably be the one working more on these for additional experiments. Overall, we tried to keep code for comparison models strictly on these nbs and separate from rest of repo (we might wish to integrate it in future - TBD).
