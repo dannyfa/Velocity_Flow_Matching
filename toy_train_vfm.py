@@ -25,71 +25,79 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.command()
 
 # Main Dset Options
-@click.option('--data_name',               help='Name of toy dset to use', metavar='STR',                                                                  type=str, required=True)
-@click.option('--data_dim',                help='Number of dimensions in original dset (w/out projection)', metavar='INT',                                 type=int, required=True)
-@click.option('--dims_to_keep',            help='Number of dimensions to keep', metavar='INT',                                                             type=int, required=True)
-@click.option('--n_trajs',                 help='Number of trajectories to sample when creating dset.', metavar='INT',                                     type=int, default=50, show_default=True)
-@click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                  type=float, default=1.0, show_default=True)
-@click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                           type=float, default=1e-3, show_default=True)
-@click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                             type=float, default=0.25, show_default=True)
+@click.option('--data_name',               help='Name of toy dset to use', metavar='STR',                                                                                       type=str, required=True)
+@click.option('--data_dim',                help='Number of dimensions in original dset (w/out projection)', metavar='INT',                                                      type=int, required=True)
+@click.option('--dims_to_keep',            help='Number of dimensions to keep', metavar='INT',                                                                                  type=int, required=True)
+@click.option('--n_trajs',                 help='Number of trajectories to sample when creating dset.', metavar='INT',                                                          type=int, default=50, show_default=True)
+@click.option('--end_t',                   help='End time for each sampled trajectory.', metavar='FLOAT',                                                                       type=float, default=1.0, show_default=True)
+@click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT',                                                type=float, default=1e-3, show_default=True)
+@click.option('--sigma_dset',              help='Std for noise used to sample trajectories.', metavar='FLOAT',                                                                  type=float, default=0.25, show_default=True)
 
 # Projection Options 
-@click.option('--project',                 help='Project original dset to higher dimensional space',                                                       is_flag=True)
-@click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                 type=int, default=3, show_default=True)
-@click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                              type=str, default='double swish', show_default=True)
-@click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                type=float, default=1.2, show_default=True)
+@click.option('--project',                 help='Project original dset to higher dimensional space',                                                                            is_flag=True)
+@click.option('--project_to',              help='Dimensionality we wish to achieve after projecting data.', metavar='INT',                                                      type=int, default=3, show_default=True)
+@click.option('--project_type',            help='Non-linearity used to construct projections', metavar='DIR',                                                                   type=str, default='double swish', show_default=True)
+@click.option('--project_temp',            help='Temperature param for non-linearity used in projection.', metavar='FLOAT',                                                     type=float, default=1.2, show_default=True)
 
 #Balls dset options
-@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                            type=int, default=28, show_default=True)
-@click.option('--data_radius',             help='Radius for balls to be created (if using balls dset)', metavar='INT',                                     type=int, default=3, show_default=True)
-@click.option('--data_inch',               help='Nuber of channels in toy img data (if using balls dset)', metavar='INT',                                  type=int, default=1, show_default=True)
-@click.option('--data_blur',               help='Whether or not to add small blur to created balls',                                                       is_flag=True)
+@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT',                                                                 type=int, default=28, show_default=True)
+@click.option('--data_radius',             help='Radius for balls to be created (if using balls dset)', metavar='INT',                                                          type=int, default=3, show_default=True)
+@click.option('--data_inch',               help='Nuber of channels in toy img data (if using balls dset)', metavar='INT',                                                       type=int, default=1, show_default=True)
+@click.option('--data_blur',               help='Whether or not to add small blur to created balls',                                                                            is_flag=True)
 
 #FM options
-@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                         type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
-@click.option('--sigma_fm',                help='Sigma val for flow matcher class', metavar='FLOAT',                                                       type=float, default=0.1, show_default=True)
-@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                          type=float, default=1.0, show_default=True)
+@click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot',                                                              type=click.Choice(['regular', 'exactot']), default='regular', show_default=True)
+@click.option('--sigma_dyn_fm',            help='Sigma val for dynamics flow matcher class', metavar='FLOAT',                                                                   type=float, default=0.1, show_default=True)
+@click.option('--sigma_comp_fm',           help='Sigma val for compression flow matcher class', metavar='FLOAT',                                                                type=float, default=0.1, show_default=True)
+@click.option('--eps',                     help='Variance for compressed dimnensions in LS. Used to sample x0s', metavar='FLOAT',                                               type=float, default=1.0, show_default=True)
+@click.option('--d_min',                   help='Minimum variance for any/all dimensions in LS. Used to sample x0s.', metavar='FLOAT',                                          type=float, default=1e-15, show_default=True)
+
 
 #Arch Options
-@click.option('--arch',                    help='Network architecture to use. This is same for u,v nets.', metavar='ToyConvUNet|ToyMLP',                   type=click.Choice(['ToyConvUNet', 'ToyMLP']), default='ToyConvUNet', show_default=True)
-@click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE',                       type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE']), default='Latent_MLP_VAE', show_default=True)
-@click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                   type=int, default=2, show_default=True)
-@click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                type=int, default=10, show_default=True)
-@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                            type=int, default=2, show_default=True)
-@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                          type=int, default=64, show_default=True)
+@click.option('--dyn_arch',                help='Dynamics net arch to use.', metavar='ToyConvUNet|ToyMLP|Adapted_ToyConvUNet',                                                  type=click.Choice(['ToyConvUNet', 'ToyMLP', 'Adapted_ToyConvUNet']), default='ToyMLP', show_default=True)
+@click.option('--flow_arch',               help='Flow net arch to use.', metavar='ToyConvUNet|ToyMLP|Adapted_ToyConvUNet',                                                      type=click.Choice(['ToyConvUNet', 'ToyMLP', 'Adapted_ToyConvUNet']), default='ToyMLP', show_default=True)
+@click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE|Latent_LargeCNN_VAE|Adapted_Latent_LargeCNN_VAE',   type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE', 'Latent_LargeCNN_VAE', 'Adapted_Latent_LargeCNN_VAE']), default='Latent_MLP_VAE', show_default=True)
+@click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT',                                                                        type=int, default=2, show_default=True)
+@click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT',                                                                     type=int, default=10, show_default=True)
+@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT',                                                                 type=int, default=2, show_default=True)
+@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT',                                                               type=int, default=64, show_default=True)
 
 
 # Training Hyperparameters.
-@click.option('--duration',               help='Training duration', metavar='MIMG',                                                                        type=click.FloatRange(min=0, min_open=True), default=7000, show_default=True)
-@click.option('--batch',                  help='Total batch size', metavar='INT',                                                                          type=click.IntRange(min=1), default=8192, show_default=True)
-@click.option('--batch-gpu',              help='Limit batch size per GPU', metavar='INT',                                                                  type=click.IntRange(min=1), default=1024, show_default=True)
-@click.option('--lr',                     help='Learning rate', metavar='FLOAT',                                                                           type=click.FloatRange(min=0, min_open=True), default=1e-5, show_default=True)
-@click.option('--use_ema',                help='Whether or not to apply EMA to model params',                                                              is_flag=True)
-@click.option('--ema',                    help='EMA half-life (if using EMA)', metavar='MIMG',                                                             type=click.FloatRange(min=0), default=0.5, show_default=True)
-@click.option('--alpha',                  help='Scale for flow net component of loss', metavar='FLOAT',                                                    type=float, default=1.0, show_default=True)
-@click.option('--beta',                   help='Scale for dynamics net component of loss', metavar='FLOAT',                                                type=float, default=1.0, show_default=True)
-@click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                              type=float, default=1.0, show_default=True)
-@click.option('--grad_clip',              help='Whether or not to clip model gradient norm.',                                                              is_flag=True)
-@click.option('--grad_clip_val',          help='Max value model gradients should be clipped to.', metavar='FLOAT',                                         type=float, default=1.0, show_default=True)
+@click.option('--duration',               help='Training duration', metavar='MIMG',                                                                                             type=click.FloatRange(min=0, min_open=True), default=7000, show_default=True)
+@click.option('--batch',                  help='Total batch size', metavar='INT',                                                                                               type=click.IntRange(min=1), default=8192, show_default=True)
+@click.option('--batch-gpu',              help='Limit batch size per GPU', metavar='INT',                                                                                       type=click.IntRange(min=1), default=1024, show_default=True)
+@click.option('--lr',                     help='Learning rate', metavar='FLOAT',                                                                                                type=click.FloatRange(min=0, min_open=True), default=1e-5, show_default=True)
+@click.option('--use_ema',                help='Whether or not to apply EMA to model params',                                                                                   is_flag=True)
+@click.option('--ema',                    help='EMA half-life (if using EMA)', metavar='MIMG',                                                                                  type=click.FloatRange(min=0), default=0.5, show_default=True)
+@click.option('--alpha',                  help='Scale for flow net component of loss', metavar='FLOAT',                                                                         type=float, default=1.0, show_default=True)
+@click.option('--beta',                   help='Scale for dynamics net component of loss', metavar='FLOAT',                                                                     type=float, default=1.0, show_default=True)
+@click.option('--gamma',                  help='Scale for Lie derivative component of loss', metavar='FLOAT',                                                                   type=float, default=1.0, show_default=True)
+@click.option('--eta',                    help='Scale for encoder reconstruction component of loss', metavar='FLOAT',                                                           type=float, default=1.0, show_default=True)
+@click.option('--grad_clip',              help='Whether or not to clip model gradient norm.',                                                                                   is_flag=True)
+@click.option('--grad_clip_val',          help='Max value model gradients should be clipped to.', metavar='FLOAT',                                                              type=float, default=1.0, show_default=True)
+@click.option('--norm_lie',               help='Whether or not to normalize Lie derivative.',                                                                                   is_flag=True)
+@click.option('--pre_train',              help='Whether or not to pre-train nets.',                                                                                             is_flag=True)
+@click.option('--pre_train_kimgs',        help='Number of Kimgs to pre-train nets for', metavar='INT',                                                                          type=int, default=0, show_default=True)
 
 
 # Performance-related.
-@click.option('--ls',                     help='Loss scaling', metavar='FLOAT',                                                                            type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
-@click.option('--bench',                  help='Enable cuDNN benchmarking', metavar='BOOL',                                                                type=bool, default=True, show_default=True)
-@click.option('--cache',                  help='Cache dataset in CPU memory', metavar='BOOL',                                                              type=bool, default=True, show_default=True)
-@click.option('--workers',                help='DataLoader worker processes', metavar='INT',                                                               type=click.IntRange(min=1), default=1, show_default=True)
+@click.option('--ls',                     help='Loss scaling', metavar='FLOAT',                                                                                                 type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
+@click.option('--bench',                  help='Enable cuDNN benchmarking', metavar='BOOL',                                                                                     type=bool, default=True, show_default=True)
+@click.option('--cache',                  help='Cache dataset in CPU memory', metavar='BOOL',                                                                                   type=bool, default=True, show_default=True)
+@click.option('--workers',                help='DataLoader worker processes', metavar='INT',                                                                                    type=click.IntRange(min=1), default=1, show_default=True)
 
 
 # I/O-related.
-@click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                type=str, required=True)
-@click.option('--desc',                   help='String to include in result dir name', metavar='STR',                                                      type=str)
-@click.option('--nosubdir',               help='Do not create a subdirectory for results',                                                                 is_flag=True)
-@click.option('--tick',                   help='How often to print progress', metavar='KIMG',                                                              type=click.IntRange(min=1), default=50, show_default=True)
-@click.option('--snap',                   help='How often to save snapshots', metavar='TICKS',                                                             type=click.IntRange(min=1), default=250, show_default=True)
-@click.option('--dump',                   help='How often to dump state', metavar='TICKS',                                                                 type=click.IntRange(min=1), default=250, show_default=True)
-@click.option('--seed',                   help='Random seed  [default: random]', metavar='INT',                                                            type=int)
-@click.option('--resume',                 help='Resume from previous training state', metavar='PT',                                                        type=str)
-@click.option('-n', '--dry-run',          help='Print training options and exit',                                                                          is_flag=True)
+@click.option('--outdir',                  help='Where to save the results', metavar='DIR',                                                                                     type=str, required=True)
+@click.option('--desc',                   help='String to include in result dir name', metavar='STR',                                                                           type=str)
+@click.option('--nosubdir',               help='Do not create a subdirectory for results',                                                                                      is_flag=True)
+@click.option('--tick',                   help='How often to print progress', metavar='KIMG',                                                                                   type=click.IntRange(min=1), default=50, show_default=True)
+@click.option('--snap',                   help='How often to save snapshots', metavar='TICKS',                                                                                  type=click.IntRange(min=1), default=250, show_default=True)
+@click.option('--dump',                   help='How often to dump state', metavar='TICKS',                                                                                      type=click.IntRange(min=1), default=250, show_default=True)
+@click.option('--seed',                   help='Random seed  [default: random]', metavar='INT',                                                                                 type=int)
+@click.option('--resume',                 help='Resume from previous training state', metavar='PT',                                                                             type=str)
+@click.option('-n', '--dry-run',          help='Print training options and exit',                                                                                               is_flag=True)
 
 
 def main(**kwargs):
@@ -131,23 +139,15 @@ def main(**kwargs):
     
     #setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
-                                        sigma=opts.sigma_fm, class_name='training.loss.VFMToyLoss')
+                                        sigma_dynamics=opts.sigma_dyn_fm, sigma_compression=opts.sigma_comp_fm, \
+                                            normalize_lie=opts.norm_lie, class_name='training.loss.VFMToyLoss')
     
-    #setup net kwargs 
-    if opts.arch == "ToyConvUNet": 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, channels=[32, 64, 128, 256], conv_embed_dim=256, \
-                                               data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                                   class_name='training.networks.VFMToyNet') 
-    elif opts.arch=='ToyMLP': 
-        c.network_kwargs = dnnlib.EasyDict(model_type=opts.arch, data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, \
-                                           class_name='training.networks.VFMToyNet')
-
-    else:
-        raise NotImplementedError('Only ToyConvUNet and ToyMLP architectures supported!') 
-    
-    c.network_kwargs.update(depth_encoder=opts.encoder_depth, width_encoder=opts.encoder_width, cd_eps=opts.eps, \
-                            depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width, img_size=opts.data_imgshape, in_ch=opts.data_inch, \
-                                encoder_type=opts.encoder_arch)
+    #setup network kwargs
+    #here, I pass all args, for all possible arches. some of these may not be used depending on arch choices... 
+    c.network_kwargs = dnnlib.EasyDict(dyn_model_type=opts.dyn_arch, flow_model_type=opts.flow_arch, encoder_type=opts.encoder_arch, channels=[32, 64, 128, 256], conv_embed_dim=256, \
+                            data_dim=working_data_dim, dims_to_keep=opts.dims_to_keep, depth_mlp=opts.mlp_depth, width_mlp=opts.mlp_width, depth_encoder=opts.encoder_depth, \
+                                width_encoder=opts.encoder_width, cd_eps=opts.eps, d_min=opts.d_min, img_size=opts.data_imgshape, in_ch=opts.data_inch, class_name='training.networks.VFMToyNet')
+                                
         
     # Training options.
     c.total_kimg = max(int(opts.duration * 1000), 1)
@@ -156,8 +156,9 @@ def main(**kwargs):
     c.update(batch_size=opts.batch, batch_gpu=opts.batch_gpu)
     c.update(loss_scaling=opts.ls, cudnn_benchmark=opts.bench)
     c.update(kimg_per_tick=opts.tick, snapshot_ticks=opts.snap, state_dump_ticks=opts.dump)
-    c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma)
+    c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma, eta=opts.eta)
     c.update(grad_clip=opts.grad_clip, grad_clip_val=opts.grad_clip_val)
+    c.update(pre_train=opts.pre_train, pre_train_kimgs=opts.pre_train_kimgs)
     
     # Random seed.
     if opts.seed is not None:
@@ -178,7 +179,7 @@ def main(**kwargs):
 
     # Description string.
     schedule_type_str = 'prp' if working_data_dim == opts.dims_to_keep else 'prr' 
-    desc = f'{opts.data_name}-{schedule_type_str}-uncond-{opts.arch}-{opts.flow_matcher_type}FM-gpus{dist.get_world_size():d}-batch{c.batch_size:d}-fp32'
+    desc = f'{opts.data_name}-{schedule_type_str}-uncond-{opts.flow_matcher_type}FM-gpus{dist.get_world_size():d}-batch{c.batch_size:d}-fp32'
 
     if opts.desc is not None:
         desc += f'-{opts.desc}'
@@ -218,6 +219,7 @@ def main(**kwargs):
     dist.print0('Creating output directory...')
     if dist.get_rank() == 0:
         os.makedirs(c.run_dir, exist_ok=True)
+        c.network_kwargs.update(save_dir=c.run_dir) #add save_dir to network kwargs 
         with open(os.path.join(c.run_dir, 'training_options.json'), 'wt') as f:
             json.dump(c, f, indent=2)
         dnnlib.util.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)

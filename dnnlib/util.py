@@ -30,6 +30,7 @@ from torch.utils.data.dataset import Dataset
 from sklearn.decomposition import PCA
 from abc import ABC,abstractmethod
 from scipy.ndimage import gaussian_filter
+import matplotlib.pyplot as plt 
 
 from distutils.util import strtobool
 from typing import Any, List, Tuple, Union, Optional
@@ -743,6 +744,76 @@ def calc_dyn_trajectories(model, init_samples, tau, nt=100):
         traj = node.trajectory(init_samples, ts)
     return traj
 
+
+#method to simulate traj encoding 
+
+def sim_encoded_trajs(gt_trajs, encoder_net, device):
+    """
+    Chooses one GT traj from training set at random
+    and encodes it. 
+    """
+    traj_to_sim_idx = np.random.choice(np.arange(gt_trajs.shape[0]), size=1, replace=False)
+    traj_to_sim = torch.from_numpy(gt_trajs[traj_to_sim_idx, :, :]).type(torch.float32).to(device).squeeze(0)
+    with torch.no_grad():
+        encoded_traj = encoder_net.rsample(traj_to_sim)
+    return traj_to_sim.cpu().numpy(), encoded_traj.detach().cpu().numpy()
+
+
+def plot_balls_traj(traj_to_plot):
+    """
+    Constructs simple 5x10 grid with 50 first
+    steps of a given trajectory.
+    """
+    fig,axs = plt.subplots(nrows=5,ncols=10, figsize=(10,10))
+    for i in range(5):
+        for j in range(10):
+            frame_idx = i*10 + j 
+            frame_to_plot = traj_to_plot[frame_idx, :, :, :]
+            axs[i, j].imshow(np.squeeze(frame_to_plot), cmap='gray')
+    return fig 
+
+
+def plot_encoded_trajs(gt_traj, encoded_traj, imgshape):
+    """
+    Construct GT vs. encoded trajectories figure
+    which will be logged into TB.
+    """
+    gt_fig = plot_balls_traj(gt_traj.reshape(-1, imgshape, imgshape, 1))
+    enc_fig = plot_balls_traj(encoded_traj.reshape(-1, imgshape, imgshape, 1))
+    return gt_fig, enc_fig 
+
+#------------------------------------------------------------------------------#
+
+# Methods to sim dynamics trajectories using simple SDEs
+
+def get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt):
+    """
+    Computes dx for a single Euler-Marayuma update step.
+    """
+    dyn_net_wrapper = dyn_torch_wrapper(dyn_net, flow_time)
+    f = dyn_net_wrapper(flow_time, curr_x) #bs, dim 
+    g = sigma * torch.eye(curr_x.shape[1]).type(torch.float32).to(curr_x.device) #dim, dim
+    dW = torch.randn(curr_x.shape).type(torch.float32).to(curr_x.device)*np.sqrt(dt) #bs, dim 
+    g_dW = torch.einsum('ij, bjk -> bik', g, dW.unsqueeze(-1)).squeeze(-1) #bs, dim
+    dx = f*dt + g_dW
+    return dx
+
+
+def int_dyn_SDE(init_x, dyn_net, flow_time, sigma, start_time, end_time, dt):
+    """
+    Simulates SDE from start time to end time, at dt steps
+    Uses dx defined above.
+    """
+    times = torch.arange(start_time, end_time, step=dt)
+    int_trajs = []
+    curr_x = init_x #bs, dim 
+    int_trajs.append(init_x.cpu().numpy())
+    for t in range(times.shape[0]):
+        dx = get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt)
+        curr_x += dx
+        int_trajs.append(curr_x.cpu().numpy())
+    return int_trajs
+    
 #------------------------------------------------------------------------------#
 
 # Util classes (EDM repo)

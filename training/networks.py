@@ -18,6 +18,7 @@ import torch
 import torch.distributions as D 
 from torch_utils import persistence
 from torch.nn.functional import silu
+import os
 from torch_cfm.models.unet.unet import UNetModelWrapper 
 
 #----------------------------------------------------------------------------
@@ -133,11 +134,12 @@ class Dense(torch.nn.Module):
 
 #----------------------------------------------------------------------------#
 
+#Toy Conv UNet for simple img data 
 @persistence.persistent_class
 class ToyConvUNet(torch.nn.Module):
   """A time-dependent model built upon U-Net architecture."""
 
-  def __init__(self, channels=[32, 64, 128, 256], embed_dim=256, img_size=28, img_ch=1):
+  def __init__(self, channels=[32, 64, 128, 256], embed_dim=256, img_size=28, img_ch=1, input_size=784):
     """
     Initialize a time-dependent flow network.
 
@@ -229,7 +231,82 @@ class ToyConvUNet(torch.nn.Module):
     return h
 
 #---------------------------------------------------------------------------#
+#Equivalent ToyConvUNet adapted for non-image toys...
+
+@persistence.persistent_class
+class Adapted_ToyConvUNet(torch.nn.Module):
+
+  def __init__(self, channels=[32, 64, 128, 256], embed_dim=256, img_size=8, img_ch=1, input_size=2):
+    super().__init__()
+    #set up basic shapes for img
+    self.img_size=img_size
+    self.img_ch=img_ch
+    self.latent_size = img_ch*img_size**2 
+    # Gaussian random feature embedding layer for time
+    self.embed = torch.nn.Sequential(GaussianFourierProjection(embed_dim=embed_dim),
+         torch.nn.Linear(embed_dim, embed_dim))
+    #Up/Down-sampling linear layers for non-image toys... 
+    self.up_fc = torch.nn.Linear(input_size, self.latent_size, bias=True)
+    self.down_fc = torch.nn.Linear(self.latent_size, input_size, bias=True)
+    # Encoding layers where the resolution decreases
+    self.conv1 = torch.nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
+    self.dense1 = Dense(embed_dim, channels[0])
+    self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+    self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=1, bias=False)
+    self.dense2 = Dense(embed_dim, channels[1])
+    self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=1, bias=False)
+    self.dense3 = Dense(embed_dim, channels[2])
+    self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+
+    # Decoding layers where the resolution increases
+    self.tconv3 = torch.nn.ConvTranspose2d(channels[2], channels[1], 3, stride=1, bias=False)    
+    self.dense4 = Dense(embed_dim, channels[1])
+    self.tgnorm3 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.tconv2 = torch.nn.ConvTranspose2d(channels[1] + channels[1], channels[0], 3, stride=1, bias=False)    
+    self.dense5 = Dense(embed_dim, channels[0])
+    self.tgnorm2 = torch.nn.GroupNorm(32, num_channels=channels[0])
+    self.tconv1 = torch.nn.ConvTranspose2d(channels[0] + channels[0], 1, 3, stride=1)
+
+  def forward(self, x, t): 
+    #apply up-sampling fc layer for x 
+    x = self.up_fc(x)
+    # reshape flattened array 
+    x = x.reshape(-1, self.img_ch, self.img_size, self.img_size)
+    # Obtain the Gaussian random feature embedding for t   
+    embed = silu(self.embed(t))    
+    
+    # Encoding path
+    h1 = self.conv1(x)
+    h1 += self.dense1(embed)
+    h1 = silu(self.gnorm1(h1))
+      
+    h2 = self.conv2(h1)
+    h2 += self.dense2(embed)
+    h2 = silu(self.gnorm2(h2))
+      
+    h3 = self.conv3(h2)
+    h3 += self.dense3(embed)
+    h3 = silu(self.gnorm3(h3))
+
+    h4 = self.tconv3(h3)
+    h4 += self.dense4(embed)
+    h4 = silu(self.tgnorm3(h4))
+
+    h5 = self.tconv2(torch.cat([h4, h2], dim=1))
+    h5 += self.dense5(embed)
+    h5 = silu(self.tgnorm2(h5))
+
+    h6 = self.tconv1(torch.cat([h5, h1], dim=1))
+
+    #now re-shape and downsample
+    h6 = h6.reshape(-1, self.latent_size)
+    h7 = self.down_fc(h6)
+    return h7
+
+#---------------------------------------------------------------------------#
 #Simple toy MLP arch (from CFM repo)
+#This can be used for any type of toy! 
 
 @persistence.persistent_class
 class ToyMLP(torch.nn.Module):
@@ -251,12 +328,12 @@ class ToyMLP(torch.nn.Module):
         return self.net(torch.cat([x, t[:, None]], dim=-1))
 
 #----------------------------------------------------------------------------
-#VAE encoder class -- from Miles' branch 
-
+#MLP Encoder 
+#Can be used for any toy type!!
 @persistence.persistent_class
 class Latent_MLP_VAE(torch.nn.Module):
     
-    def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5):
+    def __init__(self, input_size, output_size, dims_to_keep, num_hidden, hidden_size=10, eps=1e-5, d_min=1e-10):
 
         super().__init__()
 
@@ -288,6 +365,10 @@ class Latent_MLP_VAE(torch.nn.Module):
         else: 
             self.d_max_diag = torch.ones(output_size).unsqueeze(0) #1, dim 
         
+        #set out min val for D diag
+        #this is just to avoid chol from failing as model trains 
+        self.d_min_diag = torch.ones(output_size).unsqueeze(0)*d_min #1, dim 
+        
     def encode(self, x):
         mu,u, d = self.mu(x),self.u(x),self.d(x)
         u = u.unsqueeze(-1) #bs,dim,1
@@ -300,36 +381,41 @@ class Latent_MLP_VAE(torch.nn.Module):
         L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
         #now setup D
         d = torch.exp(d) #d has to be pos
-        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
-        D = torch.diag_embed(d) #bs,dim,dim
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
-        return mu, L_tril 
+        d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
+        d = torch.diag_embed(d) #bs,dim,dim
+        return mu, d, L
+
     
     def rsample(self, x):
-        mu, L_tril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
-        z = latent_dist.rsample()
-        return z 
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril) 
+        z = latent_dist.rsample() 
+        return z
+
         
     def forward(self,x):
         
-        mu, L_tril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
-        z = latent_dist.rsample()
-        #print(z.shape)
-        #print(latent_dist.entropy().shape)
-        
-        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril) 
+        z = latent_dist.rsample() 
+        #print(z.shape) 
+        #print(latent_dist.entropy().shape) 
+        kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi)) 
         #assert False
-        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
-        
-        return z,-kl_term
+        kl_term = kl_term.sum() + torch.sum(latent_dist.entropy()) 
+        return z, -kl_term
+
     
 #---------------------------------------------------------------------------
 
+#CNN Encoder Arches for Image Toys
+
 @persistence.persistent_class
 class Latent_CNN_VAE(torch.nn.Module):
-    def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0):
+    def __init__(self, img_resolution=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-10):
         
         super().__init__()
 
@@ -343,6 +429,10 @@ class Latent_CNN_VAE(torch.nn.Module):
             self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
         else: 
             self.d_max_diag = torch.ones(self.input_dim).unsqueeze(0) #1, dim 
+
+        #set out min val for D diag
+        #this is just to avoid chol from failing as model trains 
+        self.d_min_diag = torch.ones(self.input_dim).unsqueeze(0)*d_min #1, dim 
     
         # For encoder
         self.conv1 = torch.nn.Conv2d(1, 16, kernel_size=5, stride=2)
@@ -377,20 +467,21 @@ class Latent_CNN_VAE(torch.nn.Module):
 
         #now setup D
         d = torch.exp(d) #d has to be pos
-        d = torch.clamp(d, max=self.d_max_diag.to(x.device)) #clip d 
-        D = torch.diag_embed(d) #bs,dim,dim
-        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(D))
-        
-        return mu, L_tril         
+        d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
+        d = torch.diag_embed(d) #bs,dim,dim
+        return mu, d, L
+          
         
     def rsample(self, x):
-        mu, Ltril = self.encode(x)
-        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=Ltril)
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+        latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         return z #bs, dim   
     
     def forward(self, x):
-        mu, L_tril = self.encode(x)
+        mu, d, L = self.encode(x)
+        L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
         latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
         z = latent_dist.rsample()
         
@@ -400,6 +491,190 @@ class Latent_CNN_VAE(torch.nn.Module):
         
         return z,-kl_term
 
+
+#slightly larger/more powerful arch 
+@persistence.persistent_class
+class Latent_LargeCNN_VAE(torch.nn.Module):
+
+  def __init__(self, channels=[32, 64, 128, 256], img_size=28, img_ch=1, dims_to_keep=784, eps=1.0, d_min=1e-15, input_size=784):
+    super().__init__()
+    
+    #set up general attributes
+    self.input_dim = img_ch*img_size**2
+    self.img_size=img_size
+    self.img_ch=img_ch
+
+    #set d_max tensor
+    if dims_to_keep < self.input_dim: 
+        d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+        d_max_cds = torch.ones(self.input_dim - dims_to_keep).unsqueeze(0) * eps 
+        self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
+    else: 
+        self.d_max_diag = torch.ones(self.input_dim).unsqueeze(0) #1, dim 
+
+    #set d_min tensor
+    self.d_min_diag = torch.ones(self.input_dim).unsqueeze(0)*d_min #1, dim 
+
+    # Conv layers with decreasing res 
+    self.conv1 = torch.nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
+    self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+    self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
+    self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
+    self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+    self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
+    self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3])    
+
+    #Linear Layers to extract mu, d, u
+    self.mu = torch.nn.Linear(256*2*2, self.input_dim)
+    self.d = torch.nn.Linear(256*2*2, self.input_dim)
+    self.u = torch.nn.Linear(256*2*2, self.input_dim)  
+  
+  def encode(self, x): 
+    # Reshape flattened array 
+    x = x.reshape(-1, self.img_ch, self.img_size, self.img_size)
+   
+    # Encoder Conv/Gnorm BLocks
+    h1 = silu(self.gnorm1(self.conv1(x)))
+    h2 = silu(self.gnorm2(self.conv2(h1)))
+    h3 = silu(self.gnorm3(self.conv3(h2)))
+    h4 = silu(self.gnorm4(self.conv4(h3)))
+
+    #Extract mu, d, u
+    mu = self.mu(h4.reshape(x.shape[0], -1))
+    d = self.d(h4.reshape(x.shape[0], -1))
+    u = self.u(h4.reshape(x.shape[0], -1))
+
+    #Compute desired D, L matrices  
+    #L = uu^\top 
+    u = u.unsqueeze(-1) 
+    L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1))
+    #force L to be lower triangular
+    L = torch.tril(L)        
+    #force diagonals of L to be == 1 
+    L_diag = torch.diagonal(L, dim1=-2, dim2=-1)
+    L_diag_ones = torch.ones(L_diag.shape).to(x.device)
+    L -= torch.diag_embed(L_diag) #remove original diagonal 
+    L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+
+    #D=exp(d), clamped by eps, d_min
+    d = torch.exp(d)
+    d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device))
+    d = torch.diag_embed(d) 
+
+    #return encoder mean, d, L
+    return mu, d, L 
+    
+  def rsample(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      return z   
+    
+  def forward(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+      kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
+      return z,-kl_term
+#----------------------------------------------------------------------------
+#version of LargeCNN Enc above for non-image toys
+
+@persistence.persistent_class
+class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
+  def __init__(self, channels=[32, 64, 128, 256], img_size=8, img_ch=1, input_size=2, dims_to_keep=2, eps=1.0, d_min=1e-15):
+    super().__init__()
+    #set up basic shapes for img
+    self.img_size=img_size
+    self.img_ch=img_ch
+    self.latent_size = img_ch*img_size**2 
+    self.input_size = input_size
+
+    #set d_max tensor
+    if dims_to_keep < self.input_size: 
+        d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+        d_max_cds = torch.ones(self.input_size - dims_to_keep).unsqueeze(0) * eps 
+        self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim    
+    else: 
+        self.d_max_diag = torch.ones(self.input_size).unsqueeze(0) #1, dim 
+
+    #set d_min tensor
+    self.d_min_diag = torch.ones(self.input_size).unsqueeze(0)*d_min #1, dim 
+    
+    #Upsampling linear layers for non-image toys... 
+    self.up_fc = torch.nn.Linear(input_size, self.latent_size, bias=True)
+      
+    # Encoding layers where the resolution decreases
+    self.conv1 = torch.nn.Conv2d(1, channels[0], 3, stride=1, bias=False)
+    self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+    self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=1, bias=False)
+    self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+    self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=1, bias=False)
+    self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+      
+    #general linear layer before extracting mu, d, u
+    self.fc1 = torch.nn.Linear(128*2*2, 100)
+      
+    #mu, u, d layers
+    self.mu = torch.nn.Linear(100, input_size)
+    self.d = torch.nn.Linear(100, input_size)
+    self.u = torch.nn.Linear(100, input_size)
+    
+    
+  def encode(self, x): 
+    # Apply up-sampling fc layer for x 
+    x = self.up_fc(x)
+    # Reshape flattened array 
+    x = x.reshape(-1, self.img_ch, self.img_size, self.img_size)
+
+    # Feed through CNN Encoding path
+    h1 = silu(self.gnorm1(self.conv1(x)))      
+    h2 = silu(self.gnorm2(self.conv2(h1)))      
+    h3 = silu(self.gnorm3(self.conv3(h2)))
+
+    # Extract mu, u, d
+    h4 = self.fc1(h3.reshape(x.shape[0], -1))
+    mu = self.mu(h4)
+    d = self.d(h4)
+    u = self.u(h4)
+
+    #Compute desired D, L matrices  
+    #L = uu^\top 
+    u = u.unsqueeze(-1) 
+    L = torch.einsum('bij, bjk -> bik', u, torch.transpose(u, 2, 1))
+    #force L to be lower triangular
+    L = torch.tril(L)        
+    #force diagonals of L to be == 1 
+    L_diag = torch.diagonal(L, dim1=-2, dim2=-1)
+    L_diag_ones = torch.ones(L_diag.shape).to(x.device)
+    L -= torch.diag_embed(L_diag) #remove original diagonal 
+    L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
+
+    #D=exp(d), clamped by eps, d_min
+    d = torch.exp(d)
+    d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device))
+    d = torch.diag_embed(d) 
+      
+    return mu, d, L
+
+  def rsample(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = torch.distributions.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      return z   
+    
+  def forward(self, x):
+      mu, d, L = self.encode(x)
+      L_tril = torch.einsum('bij, bjk -> bik', L, torch.sqrt(d))
+      latent_dist = D.MultivariateNormal(loc=mu, scale_tril=L_tril)
+      z = latent_dist.rsample()
+      kl_term = -0.5 * (torch.sum(torch.pow(z,2),axis=-1) + z.shape[-1] * np.log(2*np.pi))
+      kl_term = kl_term.sum() + torch.sum(latent_dist.entropy())
+      return z,-kl_term
 
 #----------------------------------------------------------------------------
 # Group normalization.
@@ -1005,51 +1280,102 @@ class  VFMToyNet(torch.nn.Module):
                  conv_embed_dim = 256,  # Dimensionality for Gaussian random feature embeddings for conv layers
                  data_dim=2, #dimensionality of data we will feed through Net 
                  dims_to_keep = 2, #number of nominal dimensions encoder should preserve 
-                 model_type = "ToyConvUNet", #class name for underlying model
+                 dyn_model_type = "ToyMLP", #class name for underlying model
+                 flow_model_type = "ToyMLP",
                  encoder_type = "Latent_MLP_VAE",
                  depth_encoder = 2, # number of hidden layers for MLP encoder 
                  width_encoder = 10, # with of hidden units (for each layer) of MLP encoder 
                  depth_mlp = 2,  # number of hidden layers for MLPs used for flow and dyn nets
                  width_mlp = 64, # number of hidden units (for each layer) of MLPs used in flow/dynamics nets.
-                 cd_eps = 1e-5, #max variance allowed for compressed dimensions in encoder output. 
-                 img_size = 32, #size for img, if using balls or other img toy.
-                 in_ch=1 #input channel if using toy img data.
+                 cd_eps = 1.0, #max variance allowed for compressed dimensions in encoder output. 
+                 img_size = 28, #size for img, if using balls or other img toy.
+                 in_ch=1, #input channel if using toy img data.
+                 d_min=1e-15, #min value to cap D across all dimensions
+                 save_dir='' #dir where chol errors (if present) should be saved to. 
                  ):
         super().__init__()
         self.data_dim = data_dim
         self.dims_to_keep = dims_to_keep
-        self.model_type = model_type
+        self.save_dir=save_dir
         
-        #create u,v nets 
-        assert model_type in ["ToyConvUNet", "ToyMLP"]
-        if model_type=="ToyConvUNet":
-            self.unet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch)
-            self.vnet_model = globals()[model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch) 
+        #create u net 
+        if flow_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
+            self.unet_model = globals()[flow_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
+                                                         input_size=data_dim)
         else:
-            self.unet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
-            self.vnet_model = globals()[model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+            self.unet_model = globals()[flow_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+        
+        #create vnet 
+        if dyn_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
+            self.vnet_model = globals()[dyn_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
+                                                        input_size=data_dim)
+        else:
+            self.vnet_model = globals()[dyn_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
         #create encoder net 
-        assert encoder_type in ["Latent_MLP_VAE", "Latent_CNN_VAE"]
-        if encoder_type == "Latent_MLP_VAE": 
+        if encoder_type in ['Latent_LargeCNN_VAE', "Adapted_Latent_LargeCNN_VAE"]:
+            self.encoder = globals()[encoder_type](channels=channels, img_size=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
+                                                   d_min=d_min, input_size=data_dim) 
+
+        elif encoder_type == "Latent_MLP_VAE": 
             self.encoder = globals()[encoder_type](input_size=data_dim, output_size=data_dim, \
                                               dims_to_keep=dims_to_keep, num_hidden=depth_encoder, \
-                                                  hidden_size=width_encoder, eps=cd_eps) 
+                                                  hidden_size=width_encoder, eps=cd_eps, d_min=d_min) 
+
+        else:
+            self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps, \
+                                                   d_min=d_min) 
+        
+                
+    def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher, pre_training=False):
+        if pre_training:
+            #get proposals from encoder 
+            x0_0 = self.encoder.rsample(x0_1)
+            xdt_0 = self.encoder.rsample(xdt_1) 
+            
+            #get compression flow interpolated forms
+            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+            
+            #get dynamics flow interpolated form 
+            #this is over all taus, we just don't enforce Lie yet 
+            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt))
+            ## now get u, v
+            u = self.unet_model(x0_tau, taus)
+            v = self.vnet_model(xt_tau, taus) 
+            
+            #make all Lie related components zero (for now)
+            partial_tau_v = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+            nabla_v = torch.zeros(x0_1.shape[0], x0_1.shape[1], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+            nabla_u = torch.zeros(x0_1.shape[0], x0_1.shape[1], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+        
         else: 
-            self.encoder = globals()[encoder_type](img_resolution=img_size, img_ch=in_ch, dims_to_keep=dims_to_keep, eps=cd_eps) 
+            #if DONE with pre-training 
+            x0_0 = self.encoder.rsample(x0_1)
+            xdt_0 = self.encoder.rsample(xdt_1) 
+            #get x0_tau, u0_tau; xdt_tau 
+            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus) 
+            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+            
+            #get xt_tau, ut_tau 
+            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt)) 
+            
+            #now get net estimates for u, v  
+            u = self.unet_model(x0_tau, taus) 
+            v = self.vnet_model(xt_tau, taus) 
+            
+            #get components of Lie Loss that require grad calc 
+            taus.requires_grad=True 
+            vnet_jac = torch.autograd.functional.jacobian(self.vnet_model, (xt_tau, taus)) 
+            nabla_v = torch.sum(vnet_jac[0], dim=2).transpose(2,1) #bs, d, d 
+            partial_tau_v = torch.sum(vnet_jac[1], dim=2) #bs,d  
+            unet_jac = torch.autograd.functional.jacobian(self.unet_model, (x0_tau, taus)) 
+            nabla_u = torch.sum(unet_jac[0], dim=2).transpose(2,1) #bs, d, d
         
         
-    def get_x0s(self, x1):
-        """
-        Samples a pt x0 in latent space, given its dynamics 
-        equivalent in data space.
-        """
-        x0 = self.encoder.rsample(x1)
-        return x0
-        
-    def forward(self, x0_tau, xt_tau, taus): 
-        u = self.unet_model(x0_tau, taus)
-        v = self.vnet_model(xt_tau, taus) 
-        return u, v
+        return u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0 
+            
+            
+
     
     
