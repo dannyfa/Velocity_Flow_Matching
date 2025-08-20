@@ -46,7 +46,7 @@ def load_nwb_stream(id,filepath):
 
 ##### Loaders for Motor Cortex recordings -- Maze (center out reaching with barriers) task ######
 
-def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_sec = 40, batch_size = 128):
+def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers = 1, batch_size = 128):
     """
     this dataset is very large!!  use caution when loading,
       it takes up all RAM on gungnir when spike smoothing
@@ -65,6 +65,7 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_sec 
         io_stream = NWBHDF5IO(file=file)
         nwbfile_stream = io_stream.read()
         dataset = NWBDataset(nwbfile_stream, split_heldout=True)
+
     dataset.smooth_spk(spike_smooth_ms, name='smth')
     trial_start_times = dataset.trial_info.start_time.dt.total_seconds().to_numpy()
     trial_end_times = dataset.trial_info.end_time.dt.total_seconds().to_numpy()
@@ -80,7 +81,7 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_sec 
     trial_info_names = ['trial_type', 'trial_version', 'maze_id', 'success',
                         'target_on_time', 'go_cue_time', 'move_onset_time', 
                         'rt', 'delay', 'num_targets', 'target_pos',
-                        'num_barriers', 'barrier_pos', 'active_target', 'target_pos']
+                        'num_barriers', 'barrier_pos', 'active_target']
     behavior_names = ['cursor_pos', 'eye_pos', 'hand_pos', 'hand_vel']
     metadata = {'train':{
                         'trial_info':{name:[] for name in trial_info_names},
@@ -106,17 +107,17 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_sec 
     train_dataset = ToyDsetDynamics(splitted_data['train'], dt=1e-3, nForward=nForward)
     val_dataset = ToyDsetDynamics(splitted_data['val'], dt=1e-3, nForward=nForward)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
 
     io_stream.close()
 
-
     return train_dataloader, val_dataloader, metadata
+
 
 #### Loaders for Brodmann's area 2 recordings -- center-out reach with bump task #############
 
-def loader_area2_bump_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_sec = 40, batch_size = 128):
+def loader_area2_bump_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers = 1, batch_size = 128):
     dandiset_id = '000127' ### name of the dataset on DANDI archive (should be in the notebook example)
     filepath= "sub-Han/sub-Han_desc-train_behavior+ecephys.nwb" ### filepath on dandi archive
                                                                 ### accessible by searching the dandi ID 
@@ -171,14 +172,12 @@ def loader_area2_bump_with_behavior(spike_smooth_ms = 40, nForward = 1, smooth_s
     train_dataset = ToyDsetDynamics(splitted_data['train'], dt=1e-3, nForward=nForward)
     val_dataset = ToyDsetDynamics(splitted_data['val'], dt=1e-3, nForward=nForward)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
 
     io_stream.close()
 
-
     return train_dataloader, val_dataloader, metadata
-
 
 ############## Loaders for Dorsomedial Frontal Cortex recordings -- Ready-Set-Go task ################
 
