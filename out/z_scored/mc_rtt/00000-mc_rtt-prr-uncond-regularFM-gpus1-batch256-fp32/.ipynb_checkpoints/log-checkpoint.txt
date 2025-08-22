@@ -1,0 +1,166 @@
+Creating TB dir and writter...
+Using provided dataset...
+/home/ganchao/miniconda3/envs/vfm/lib/python3.9/site-packages/torch/utils/data/sampler.py:68: UserWarning: `data_source` argument is not used and will be removed in 2.2.0.You may still have custom implementation that utilizes it.
+  warnings.warn(
+Constructing network...
+
+VFMToyNet       Parameters  Buffers  Output shape  Datatype
+---             ---         ---      ---           ---     
+encoder.mu.0    12672       -        [256, 128]    float32 
+encoder.mu.1    -           -        [256, 128]    float32 
+encoder.mu.2    16512       -        [256, 128]    float32 
+encoder.mu.3    -           -        [256, 128]    float32 
+encoder.mu.4    16512       -        [256, 128]    float32 
+encoder.mu.5    -           -        [256, 128]    float32 
+encoder.mu.6    16512       -        [256, 128]    float32 
+encoder.mu.7    -           -        [256, 128]    float32 
+encoder.mu.8    16512       -        [256, 128]    float32 
+encoder.mu.9    -           -        [256, 128]    float32 
+encoder.mu.10   12642       -        [256, 98]     float32 
+encoder.mu.0    -           -        [256, 128]    float32 
+encoder.mu.1    -           -        [256, 128]    float32 
+encoder.mu.2    -           -        [256, 128]    float32 
+encoder.mu.3    -           -        [256, 128]    float32 
+encoder.mu.4    -           -        [256, 128]    float32 
+encoder.mu.5    -           -        [256, 128]    float32 
+encoder.mu.6    -           -        [256, 128]    float32 
+encoder.mu.7    -           -        [256, 128]    float32 
+encoder.mu.8    -           -        [256, 128]    float32 
+encoder.mu.9    -           -        [256, 128]    float32 
+encoder.mu.10   -           -        [256, 98]     float32 
+unet_model.net  445538      -        [256, 98]     float32 
+vnet_model.net  445538      -        [256, 98]     float32 
+<top-level>:0   196         -        [256, 98]     float32 
+<top-level>:1   -           -        [256, 98]     float32 
+<top-level>:2   -           -        [256, 98]     float32 
+<top-level>:3   -           -        [256, 98]     float32 
+<top-level>:4   -           -        [256, 98]     float32 
+<top-level>:5   -           -        [256, 98]     float32 
+---             ---         ---      ---           ---     
+Total           982634      0        -             -       
+
+Setting up optimizer and loss fn...
+Training for 500000 kimg...
+
+tick 0     sec/tick 0.1     sec/kimg 0.30    dyn_loss 921.837 total_loss 2818.110
+tick 1     sec/tick 0.5     sec/kimg 0.04    dyn_loss 987.576 total_loss 2967.050
+tick 2     sec/tick 0.6     sec/kimg 0.04    dyn_loss 1064.202 total_loss 2775.271
+tick 3     sec/tick 0.5     sec/kimg 0.03    dyn_loss 955.148 total_loss 2810.185
+tick 4     sec/tick 0.5     sec/kimg 0.03    dyn_loss 841.158 total_loss 2551.445
+tick 5     sec/tick 0.5     sec/kimg 0.03    dyn_loss 1028.323 total_loss 2906.494
+tick 6     sec/tick 0.5     sec/kimg 0.03    dyn_loss 814.894 total_loss 2665.847
+tick 7     sec/tick 0.5     sec/kimg 0.03    dyn_loss 691.160 total_loss 2559.150
+tick 8     sec/tick 0.5     sec/kimg 0.03    dyn_loss 938.727 total_loss 2745.375
+tick 9     sec/tick 0.5     sec/kimg 0.03    dyn_loss 838.990 total_loss 2612.844
+tick 10    sec/tick 0.5     sec/kimg 0.03    dyn_loss 800.103 total_loss 2589.537
+tick 11    sec/tick 0.5     sec/kimg 0.03    dyn_loss 933.167 total_loss 2776.909
+tick 12    sec/tick 0.5     sec/kimg 0.03    dyn_loss 947.585 total_loss 2640.173
+tick 13    sec/tick 0.5     sec/kimg 0.03    dyn_loss 813.369 total_loss 2650.777
+tick 14    sec/tick 0.5     sec/kimg 0.03    dyn_loss 1032.317 total_loss 2816.669
+tick 15    sec/tick 0.5     sec/kimg 0.03    dyn_loss 883.630 total_loss 2764.870
+tick 16    sec/tick 0.5     sec/kimg 0.03    dyn_loss 703.233 total_loss 2271.931
+tick 17    sec/tick 0.5     sec/kimg 0.03    dyn_loss 915.525 total_loss 2634.337
+tick 18    sec/tick 0.5     sec/kimg 0.03    dyn_loss 829.538 total_loss 2341.311
+tick 19    sec/tick 0.5     sec/kimg 0.03    dyn_loss 885.917 total_loss 2618.327
+tick 20    sec/tick 0.5     sec/kimg 0.03    dyn_loss 599.574 total_loss 2227.533
+tick 21    sec/tick 0.5     sec/kimg 0.03    dyn_loss 799.458 total_loss 2589.703
+tick 22    sec/tick 0.5     sec/kimg 0.03    dyn_loss 824.168 total_loss 2486.803
+tick 23    sec/tick 0.5     sec/kimg 0.03    dyn_loss 812.605 total_loss 2407.050
+tick 24    sec/tick 0.5     sec/kimg 0.03    dyn_loss 876.182 total_loss 2520.757
+tick 25    sec/tick 0.5     sec/kimg 0.04    dyn_loss 656.186 total_loss 2348.606
+tick 26    sec/tick 0.5     sec/kimg 0.03    dyn_loss 781.292 total_loss 2594.642
+tick 27    sec/tick 0.5     sec/kimg 0.03    dyn_loss 731.659 total_loss 2288.651
+tick 28    sec/tick 0.5     sec/kimg 0.03    dyn_loss 692.106 total_loss 2340.043
+tick 29    sec/tick 0.5     sec/kimg 0.03    dyn_loss 690.079 total_loss 2285.298
+tick 30    sec/tick 0.4     sec/kimg 0.03    dyn_loss 772.017 total_loss 2458.021
+tick 31    sec/tick 0.5     sec/kimg 0.03    dyn_loss 696.440 total_loss 2430.544
+tick 32    sec/tick 0.5     sec/kimg 0.03    dyn_loss 634.494 total_loss 2123.026
+tick 33    sec/tick 0.5     sec/kimg 0.03    dyn_loss 616.230 total_loss 2196.901
+tick 34    sec/tick 0.5     sec/kimg 0.03    dyn_loss 584.784 total_loss 2119.145
+tick 35    sec/tick 0.5     sec/kimg 0.03    dyn_loss 603.082 total_loss 2142.018
+tick 36    sec/tick 0.5     sec/kimg 0.03    dyn_loss 539.082 total_loss 2121.732
+tick 37    sec/tick 0.5     sec/kimg 0.03    dyn_loss 647.094 total_loss 2125.904
+tick 38    sec/tick 0.5     sec/kimg 0.03    dyn_loss 763.714 total_loss 2333.575
+tick 39    sec/tick 0.5     sec/kimg 0.03    dyn_loss 576.132 total_loss 2022.200
+tick 40    sec/tick 0.5     sec/kimg 0.03    dyn_loss 566.539 total_loss 2072.047
+tick 41    sec/tick 0.5     sec/kimg 0.03    dyn_loss 670.254 total_loss 2155.209
+tick 42    sec/tick 0.5     sec/kimg 0.03    dyn_loss 724.515 total_loss 2103.957
+tick 43    sec/tick 0.5     sec/kimg 0.03    dyn_loss 721.961 total_loss 2199.629
+tick 44    sec/tick 0.6     sec/kimg 0.04    dyn_loss 533.389 total_loss 1813.546
+tick 45    sec/tick 0.5     sec/kimg 0.03    dyn_loss 456.816 total_loss 1880.881
+tick 46    sec/tick 0.5     sec/kimg 0.03    dyn_loss 723.991 total_loss 2317.325
+tick 47    sec/tick 0.5     sec/kimg 0.03    dyn_loss 513.626 total_loss 1999.425
+tick 48    sec/tick 0.7     sec/kimg 0.05    dyn_loss 562.546 total_loss 1913.840
+tick 49    sec/tick 0.5     sec/kimg 0.03    dyn_loss 461.286 total_loss 1867.857
+tick 50    sec/tick 0.5     sec/kimg 0.03    dyn_loss 483.887 total_loss 1924.184
+tick 51    sec/tick 0.5     sec/kimg 0.03    dyn_loss 522.222 total_loss 1918.454
+tick 52    sec/tick 0.6     sec/kimg 0.04    dyn_loss 658.394 total_loss 2145.691
+tick 53    sec/tick 0.6     sec/kimg 0.04    dyn_loss 467.483 total_loss 1856.243
+tick 54    sec/tick 0.6     sec/kimg 0.04    dyn_loss 420.771 total_loss 1869.333
+tick 55    sec/tick 0.6     sec/kimg 0.04    dyn_loss 515.019 total_loss 1855.092
+tick 56    sec/tick 0.6     sec/kimg 0.04    dyn_loss 533.751 total_loss 1809.979
+tick 57    sec/tick 0.6     sec/kimg 0.04    dyn_loss 461.030 total_loss 1802.111
+tick 58    sec/tick 0.6     sec/kimg 0.04    dyn_loss 441.735 total_loss 1721.100
+tick 59    sec/tick 0.6     sec/kimg 0.04    dyn_loss 444.542 total_loss 1748.555
+tick 60    sec/tick 0.6     sec/kimg 0.04    dyn_loss 414.942 total_loss 1653.119
+tick 61    sec/tick 0.6     sec/kimg 0.04    dyn_loss 399.241 total_loss 1607.855
+tick 62    sec/tick 0.6     sec/kimg 0.04    dyn_loss 432.273 total_loss 1733.439
+tick 63    sec/tick 0.6     sec/kimg 0.04    dyn_loss 446.048 total_loss 1778.889
+tick 64    sec/tick 0.6     sec/kimg 0.04    dyn_loss 445.026 total_loss 1894.229
+tick 65    sec/tick 0.6     sec/kimg 0.04    dyn_loss 319.407 total_loss 1575.858
+tick 66    sec/tick 0.6     sec/kimg 0.04    dyn_loss 373.649 total_loss 1647.319
+tick 67    sec/tick 0.7     sec/kimg 0.04    dyn_loss 411.365 total_loss 1646.981
+tick 68    sec/tick 0.7     sec/kimg 0.04    dyn_loss 379.368 total_loss 1547.030
+tick 69    sec/tick 0.6     sec/kimg 0.04    dyn_loss 390.497 total_loss 1605.716
+tick 70    sec/tick 0.6     sec/kimg 0.04    dyn_loss 316.897 total_loss 1542.834
+tick 71    sec/tick 0.8     sec/kimg 0.05    dyn_loss 326.721 total_loss 1634.696
+tick 72    sec/tick 0.6     sec/kimg 0.04    dyn_loss 270.283 total_loss 1447.459
+tick 73    sec/tick 0.6     sec/kimg 0.04    dyn_loss 257.596 total_loss 1504.071
+tick 74    sec/tick 0.6     sec/kimg 0.04    dyn_loss 287.268 total_loss 1446.882
+tick 75    sec/tick 0.6     sec/kimg 0.04    dyn_loss 277.837 total_loss 1570.531
+tick 76    sec/tick 0.6     sec/kimg 0.04    dyn_loss 316.852 total_loss 1450.601
+tick 77    sec/tick 0.6     sec/kimg 0.04    dyn_loss 303.272 total_loss 1525.010
+tick 78    sec/tick 0.6     sec/kimg 0.04    dyn_loss 179.389 total_loss 1388.648
+tick 79    sec/tick 0.6     sec/kimg 0.04    dyn_loss 250.172 total_loss 1519.997
+tick 80    sec/tick 0.6     sec/kimg 0.04    dyn_loss 227.135 total_loss 1463.815
+tick 81    sec/tick 0.6     sec/kimg 0.04    dyn_loss 180.062 total_loss 1359.451
+tick 82    sec/tick 0.6     sec/kimg 0.04    dyn_loss 204.127 total_loss 1326.351
+tick 83    sec/tick 0.6     sec/kimg 0.04    dyn_loss 214.981 total_loss 1317.356
+tick 84    sec/tick 0.6     sec/kimg 0.04    dyn_loss 236.800 total_loss 1346.717
+tick 85    sec/tick 0.7     sec/kimg 0.04    dyn_loss 234.656 total_loss 1368.073
+tick 86    sec/tick 0.6     sec/kimg 0.04    dyn_loss 216.169 total_loss 1235.288
+tick 87    sec/tick 0.6     sec/kimg 0.04    dyn_loss 200.078 total_loss 1216.539
+tick 88    sec/tick 0.6     sec/kimg 0.04    dyn_loss 213.845 total_loss 1338.052
+tick 89    sec/tick 0.6     sec/kimg 0.04    dyn_loss 163.194 total_loss 1218.138
+tick 90    sec/tick 0.6     sec/kimg 0.04    dyn_loss 171.246 total_loss 1255.963
+tick 91    sec/tick 0.6     sec/kimg 0.04    dyn_loss 168.546 total_loss 1288.377
+tick 92    sec/tick 0.6     sec/kimg 0.04    dyn_loss 193.663 total_loss 1320.297
+tick 93    sec/tick 0.6     sec/kimg 0.04    dyn_loss 192.543 total_loss 1225.859
+tick 94    sec/tick 0.7     sec/kimg 0.05    dyn_loss 165.957 total_loss 1251.280
+tick 95    sec/tick 0.6     sec/kimg 0.04    dyn_loss 177.023 total_loss 1309.396
+tick 96    sec/tick 0.6     sec/kimg 0.04    dyn_loss 162.537 total_loss 1190.017
+tick 97    sec/tick 0.6     sec/kimg 0.04    dyn_loss 150.347 total_loss 1258.733
+tick 98    sec/tick 0.6     sec/kimg 0.04    dyn_loss 132.255 total_loss 1161.125
+tick 99    sec/tick 0.6     sec/kimg 0.04    dyn_loss 129.887 total_loss 1093.614
+tick 100   sec/tick 0.6     sec/kimg 0.04    dyn_loss 122.880 total_loss 1218.456
+tick 101   sec/tick 0.6     sec/kimg 0.04    dyn_loss 154.351 total_loss 1218.822
+tick 102   sec/tick 0.6     sec/kimg 0.04    dyn_loss 128.924 total_loss 1152.273
+tick 103   sec/tick 0.6     sec/kimg 0.04    dyn_loss 116.600 total_loss 1121.271
+tick 104   sec/tick 0.6     sec/kimg 0.04    dyn_loss 125.746 total_loss 1119.017
+tick 105   sec/tick 0.6     sec/kimg 0.04    dyn_loss 107.125 total_loss 1100.112
+tick 106   sec/tick 0.6     sec/kimg 0.04    dyn_loss 126.558 total_loss 1065.006
+tick 107   sec/tick 0.6     sec/kimg 0.04    dyn_loss 129.300 total_loss 1155.760
+tick 108   sec/tick 0.6     sec/kimg 0.04    dyn_loss 94.341  total_loss 1111.786
+tick 109   sec/tick 0.6     sec/kimg 0.04    dyn_loss 112.518 total_loss 1215.551
+tick 110   sec/tick 0.6     sec/kimg 0.04    dyn_loss 110.039 total_loss 1182.978
+tick 111   sec/tick 0.6     sec/kimg 0.04    dyn_loss 135.368 total_loss 1114.335
+tick 112   sec/tick 0.6     sec/kimg 0.04    dyn_loss 108.516 total_loss 1093.812
+tick 113   sec/tick 0.6     sec/kimg 0.04    dyn_loss 109.960 total_loss 1159.975
+tick 114   sec/tick 0.6     sec/kimg 0.04    dyn_loss 103.485 total_loss 1252.891
+tick 115   sec/tick 0.6     sec/kimg 0.04    dyn_loss 103.200 total_loss 1188.543
+tick 116   sec/tick 0.6     sec/kimg 0.04    dyn_loss 91.504  total_loss 1092.556
+tick 117   sec/tick 0.6     sec/kimg 0.04    dyn_loss 91.955  total_loss 1038.607
+tick 118   sec/tick 0.7     sec/kimg 0.05    dyn_loss 74.778  total_loss 1080.013
+tick 119   sec/tick 0.6     sec/kimg 0.04    dyn_loss 91.077  total_loss 1113.976
+tick 120   sec/tick 0.6     sec/kimg 0.04    dyn_loss 91.080  total_loss 1065.396
+tick 121   sec/tick 0.6     sec/kimg 0.04    dyn_loss 71.067  total_loss 1059.185

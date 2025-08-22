@@ -19,6 +19,10 @@ from torch_utils import training_stats
 from torch_utils import misc
 from torch.utils.tensorboard import SummaryWriter
 from torch_cfm import conditional_flow_matching as cfm
+import torch.serialization
+import inspect
+from torch_utils import persistence
+import torch.nn as nn
 
 #----------------------------------------------------------------------------
 
@@ -138,6 +142,9 @@ def training_loop(
         
     if resume_state_dump:
         dist.print0(f'Loading training state from "{resume_state_dump}"...')
+
+        all_nn_classes = [obj for name, obj in inspect.getmembers(nn) if inspect.isclass(obj) and obj.__module__.startswith('torch.nn')]
+        torch.serialization.add_safe_globals(all_nn_classes + [persistence._reconstruct_persistent_obj])
         data = torch.load(resume_state_dump, map_location=torch.device('cpu'))
         misc.copy_params_and_buffers(src_module=data['net'], dst_module=net, require_all=True)
         optimizer.load_state_dict(data['optimizer_state'])
@@ -237,14 +244,22 @@ def training_loop(
         tick_end_time = time.time()
         fields = []
         fields += [f"tick {training_stats.report0('Progress/tick', cur_tick):<5d}"]
-        fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
-        fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
+        # fields += [f"kimg {training_stats.report0('Progress/kimg', cur_nimg / 1e3):<9.1f}"]
+        # fields += [f"time {dnnlib.util.format_time(training_stats.report0('Timing/total_sec', tick_end_time - start_time)):<12s}"]
         fields += [f"sec/tick {training_stats.report0('Timing/sec_per_tick', tick_end_time - tick_start_time):<7.1f}"]
         fields += [f"sec/kimg {training_stats.report0('Timing/sec_per_kimg', (tick_end_time - tick_start_time) / (cur_nimg - tick_start_nimg) * 1e3):<7.2f}"]
-        fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
-        fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
-        fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
-        fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
+        # fields += [f"maintenance {training_stats.report0('Timing/maintenance_sec', maintenance_time):<6.1f}"]
+        
+        
+        fields += [f"dyn_loss {tot_separate_losses[1].item():<7.3f}"]
+        fields += [f"total_loss {tot_scalar_loss:<7.3f}"]
+        
+
+
+        
+        # fields += [f"cpumem {training_stats.report0('Resources/cpu_mem_gb', psutil.Process(os.getpid()).memory_info().rss / 2**30):<6.2f}"]
+        # fields += [f"gpumem {training_stats.report0('Resources/peak_gpu_mem_gb', torch.cuda.max_memory_allocated(device) / 2**30):<6.2f}"]
+        # fields += [f"reserved {training_stats.report0('Resources/peak_gpu_mem_reserved_gb', torch.cuda.max_memory_reserved(device) / 2**30):<6.2f}"]
         torch.cuda.reset_peak_memory_stats()
         dist.print0(' '.join(fields))
 

@@ -112,7 +112,7 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers
 
     io_stream.close()
 
-    return train_dataloader, val_dataloader, metadata
+    return train_dataloader, val_dataloader, splitted_data['train'], splitted_data['val'], metadata
 
 
 #### Loaders for Brodmann's area 2 recordings -- center-out reach with bump task #############
@@ -177,83 +177,20 @@ def loader_area2_bump_with_behavior(spike_smooth_ms = 40, nForward = 1, num_work
 
     io_stream.close()
 
-    return train_dataloader, val_dataloader, metadata
+    return train_dataloader, val_dataloader, splitted_data['train'], splitted_data['val'], metadata
 
 ############## Loaders for Dorsomedial Frontal Cortex recordings -- Ready-Set-Go task ################
 
-# def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,validate=False):
-
-#     dandiset_id = '000130'
-#     filepath = "sub-Haydn/sub-Haydn_desc-train_ecephys.nwb"
-    
-#     nwbfile_stream,io_stream = load_nwb_stream(dandiset_id,filepath)
-
-#     #### create nwbdataset for sorting, smoothing data
-#     ds = NWBDataset(fpath=nwbfile_stream,split_heldout=True)
-#     print(f"done!") 
-#     print(f"smoothing spikes with {smooth_len_ms}ms gaussian window...")
-#     ds.smooth_spk(smooth_len_ms,name='smth_data',ignore_nans=True)
-#     print("done!")
-#     #### get start, stop, data split labels from stream ######
-#     nwbfile_stream.trials[:]#['split']
-#     start_times_s = nwbfile_stream.trials[:]['start_time'].to_numpy()
-#     end_times_s = nwbfile_stream.trials[:]['stop_time'].to_numpy()
-#     trial_labels = nwbfile_stream.trials[:]['split'].to_list()
-
-#     #### separate into trial types #####
-#     rates = ds.data.spikes_smth_data
-#     time_s = rates.index.seconds + rates.index.microseconds/1e6
-#     rates_vals = rates.to_numpy()
-#     data = {
-#         'train':[],
-#         'val':[]
-#     }
-
-#     #### set up metadata dictionary ####
-#     trial_info_names = ['start_time','stop_time','target_on_time','ready_time','set_time','go_time','reward_time','is_eye','ts','tp']
-#     behavior_names=[]
-#     metadata = {'train':{
-#                         'trial_info':{name:[] for name in trial_info_names},
-#                         'behavior':{name:[] for name in behavior_names}
-#                         },
-#                'val':{
-#                         'trial_info':{name:[] for name in trial_info_names},
-#                         'behavior':{name:[] for name in behavior_names}
-#                         }}
-
-#     #### get trial data ####
-#     for trial_ind,(label,onset,offset) in tqdm(enumerate(zip(trial_labels,start_times_s,end_times_s)),total=len(trial_labels),desc='separating into trials'):
-    
-#         inds = (time_s >=onset) & (time_s < offset)
-#         if label != 'none':
-#             data[label].append(rates_vals[inds,:])
-            
-#             for name in behavior_names:
-#                 metadata[label]['behavior'][name].append(ds.data.loc[inds][name].to_numpy())
-#             for name in trial_info_names:
-#                 metadata[label]['trial_info'][name].append(nwbfile_stream.trials[trial_ind][name].item())
-#     #### convert to things we can load data with ####
-#     if validate:
-#         validate_metadata(data,metadata)
-#     train_dataset = ToyDsetDynamics(data['train'],dt=1/1000,nForward=nForward)
-#     val_dset = ToyDsetDynamics(data['val'],dt=1/1000,nForward=nForward)
-
-#     train_loader = DataLoader(train_dataset,batch_size=batch_size,num_workers=num_workers,shuffle=True)
-#     val_loader = DataLoader(train_dataset,batch_size=batch_size,num_workers=num_workers,shuffle=False)
-
-#     io_stream.close()
-
-#     return train_loader,val_loader,metadata
-
-
 def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,validate=False):
+
     dandiset_id = '000130'
     filepath = "sub-Haydn/sub-Haydn_desc-train_ecephys.nwb"
-   
+    
     nwbfile_stream,io_stream = load_nwb_stream(dandiset_id,filepath)
+
     #### create nwbdataset for sorting, smoothing data
     ds = NWBDataset(fpath=nwbfile_stream,split_heldout=True)
-    print(f"done!")
+    print(f"done!") 
     print(f"smoothing spikes with {smooth_len_ms}ms gaussian window...")
     ds.smooth_spk(smooth_len_ms,name='smth_data',ignore_nans=True)
     print("done!")
@@ -262,6 +199,7 @@ def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=
     start_times_s = nwbfile_stream.trials[:]['start_time'].to_numpy()
     end_times_s = nwbfile_stream.trials[:]['stop_time'].to_numpy()
     trial_labels = nwbfile_stream.trials[:]['split'].to_list()
+
     #### separate into trial types #####
     rates = ds.data.spikes_smth_data
     time_s = rates.index.seconds + rates.index.microseconds/1e6
@@ -270,6 +208,7 @@ def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=
         'train':[],
         'val':[]
     }
+
     #### set up metadata dictionary ####
     trial_info_names = ['start_time','stop_time','target_on_time','ready_time','set_time','go_time','reward_time','is_eye','ts','tp']
     behavior_names=[]
@@ -281,13 +220,14 @@ def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=
                         'trial_info':{name:[] for name in trial_info_names},
                         'behavior':{name:[] for name in behavior_names}
                         }}
+
     #### get trial data ####
     for trial_ind,(label,onset,offset) in tqdm(enumerate(zip(trial_labels,start_times_s,end_times_s)),total=len(trial_labels),desc='separating into trials'):
-   
+    
         inds = (time_s >=onset) & (time_s < offset)
         if label != 'none':
             data[label].append(rates_vals[inds,:])
-           
+            
             for name in behavior_names:
                 metadata[label]['behavior'][name].append(ds.data.loc[inds][name].to_numpy())
             for name in trial_info_names:
@@ -297,12 +237,13 @@ def make_dmfc_rsg_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=
         validate_metadata(data,metadata)
     train_dataset = ToyDsetDynamics(data['train'],dt=1/1000,nForward=nForward)
     val_dset = ToyDsetDynamics(data['val'],dt=1/1000,nForward=nForward)
+
     train_loader = DataLoader(train_dataset,batch_size=batch_size,num_workers=num_workers,shuffle=True)
     val_loader = DataLoader(train_dataset,batch_size=batch_size,num_workers=num_workers,shuffle=False)
+
     io_stream.close()
-    return train_loader,val_loader,metadata,data['train']
 
-
+    return train_loader,val_loader,data['train'],data['val'],metadata
 
 
 ############ Loaders for Motor Cortex recordings -- Reach to touch task ##############################
@@ -369,4 +310,4 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
 
     io_stream.close()
 
-    return train_loader,val_loader,metadata
+    return train_loader,val_loader,data['train'],data['val'],metadata
