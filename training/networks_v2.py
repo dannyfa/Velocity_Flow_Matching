@@ -18,6 +18,7 @@ import torch
 import torch.distributions as D 
 from torch_utils import persistence
 from torch.nn.functional import silu
+import torch.nn as nn
 import os
 from torch_cfm.models.unet.unet import UNetModelWrapper 
 
@@ -310,22 +311,42 @@ class Adapted_ToyConvUNet(torch.nn.Module):
 
 @persistence.persistent_class
 class ToyMLP(torch.nn.Module):
-    def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False):
+    def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False, dropout_rate=0.1):
         super().__init__()
-        
+       
         self.time_varying = time_varying
         if out_dim is None:
             out_dim = dim
-        
-        net = [torch.nn.Linear(dim + (1 if time_varying else 0), w), torch.nn.SELU()]
+       
+        net = [torch.nn.Linear(dim + (1 if time_varying else 0), w), torch.nn.SELU(), nn.Dropout(dropout_rate)]
         for _ in range(n_hidden):
             net.append(torch.nn.Linear(w, w))
             net.append(torch.nn.SELU())
+            net.append(nn.Dropout(dropout_rate))
         net.append(torch.nn.Linear(w, out_dim))
         self.net = torch.nn.Sequential(*net)
-
     def forward(self, x, t):
         return self.net(torch.cat([x, t[:, None]], dim=-1))
+
+# class ToyMLP(torch.nn.Module):
+#     def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False):
+#         super().__init__()
+        
+#         self.time_varying = time_varying
+#         if out_dim is None:
+#             out_dim = dim
+        
+#         net = [torch.nn.Linear(dim + (1 if time_varying else 0), w), torch.nn.SELU()]
+#         for _ in range(n_hidden):
+#             net.append(torch.nn.Linear(w, w))
+#             net.append(torch.nn.SELU())
+#         net.append(torch.nn.Linear(w, out_dim))
+#         self.net = torch.nn.Sequential(*net)
+
+#     def forward(self, x, t):
+#         return self.net(torch.cat([x, t[:, None]], dim=-1))
+
+
 
 #----------------------------------------------------------------------------
 #MLP Encoder 
@@ -1282,36 +1303,52 @@ class EDMPrecond(torch.nn.Module):
 
 @persistence.persistent_class
 class ConvVNetWrapper(torch.nn.Module):
-    def __init__(self, base_model, img_ch, img_size):
+    def __init__(self, base_model, img_ch, img_size, data_dim):
         super().__init__()
         self.base_model = base_model
         self.img_ch = img_ch
         self.img_size = img_size
-        # Use 1x1 convolution to project from 2*img_ch channels to img_ch channels
-        self.channel_projection = torch.nn.Conv2d(2 * img_ch, img_ch, kernel_size=1)
+        self.data_dim = data_dim
+        
+        # Check if data is actually image data
+        self.is_image_data = (data_dim == img_ch * img_size * img_size)
+        
+        if self.is_image_data:
+            # Use 1x1 convolution to project from 2*img_ch channels to img_ch channels
+            # This preserves spatial structure unlike a linear layer
+            self.channel_projection = torch.nn.Conv2d(2 * img_ch, img_ch, kernel_size=1)
+        else:
+            # For non-image data, just use a linear projection
+            self.linear_projection = torch.nn.Linear(2 * data_dim, data_dim)
     
     def forward(self, x, t):
         batch_size = x.shape[0]
-        # x has shape (batch, 2*data_dim) where data_dim = img_ch * img_size * img_size
         
-        # Split the concatenated input back into two parts
-        data_dim = self.img_ch * self.img_size * self.img_size
-        xt_tau = x[:, :data_dim]  # First half: current position
-        x0_tau = x[:, data_dim:]  # Second half: starting position
-        
-        # Reshape both parts to image format
-        xt_tau_img = xt_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
-        x0_tau_img = x0_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
-        
-        # Concatenate along channel dimension: (batch, 2*img_ch, img_size, img_size)
-        concat_img = torch.cat([xt_tau_img, x0_tau_img], dim=1)
-        
-        # Project back to original number of channels using 1x1 conv
-        # This preserves spatial structure while mixing information from both inputs
-        projected_img = self.channel_projection(concat_img)  # (batch, img_ch, img_size, img_size)
-        
-        # Flatten back to the format expected by the base model
-        projected_flat = projected_img.reshape(batch_size, -1)
+        if self.is_image_data:
+            # Handle image data with spatial structure preservation
+            # x has shape (batch, 2*data_dim) where data_dim = img_ch * img_size * img_size
+            
+            # Split the concatenated input back into two parts
+            xt_tau = x[:, :self.data_dim]  # First half: current position
+            x0_tau = x[:, self.data_dim:]  # Second half: starting position
+            
+            # Reshape both parts to image format
+            xt_tau_img = xt_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
+            x0_tau_img = x0_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
+            
+            # Concatenate along channel dimension: (batch, 2*img_ch, img_size, img_size)
+            concat_img = torch.cat([xt_tau_img, x0_tau_img], dim=1)
+            
+            # Project back to original number of channels using 1x1 conv
+            # This preserves spatial structure while mixing information from both inputs
+            projected_img = self.channel_projection(concat_img)  # (batch, img_ch, img_size, img_size)
+            
+            # Flatten back to the format expected by the base model
+            projected_flat = projected_img.reshape(batch_size, -1)
+            
+        else:
+            # Handle non-image data with simple linear projection
+            projected_flat = self.linear_projection(x)
         
         # Pass through the base model
         return self.base_model(projected_flat, t)
@@ -1350,20 +1387,21 @@ class  VFMToyNet(torch.nn.Module):
         self.dims_to_keep = dims_to_keep
         self.save_dir=save_dir
         
-        #create u net (flow net)
+        #create u net (flow net) - input dimension stays the same
         if flow_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
             self.unet_model = globals()[flow_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
                                                          input_size=data_dim)
         else:
             self.unet_model = globals()[flow_model_type](dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
         
-        #create vnet (dynamics net)
+        #create vnet (dynamics net) - MODIFIED: input dimension is now 2*data_dim, but output dimension stays data_dim
         if dyn_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
+            # For Conv architectures, we need to create a wrapper that preserves spatial structure
             base_vnet = globals()[dyn_model_type](channels=channels, embed_dim=conv_embed_dim, img_size=img_size, img_ch=in_ch, \
                                                   input_size=data_dim)
-            self.vnet_model = ConvVNetWrapper(base_vnet, in_ch, img_size)
+            self.vnet_model = ConvVNetWrapper(base_vnet, in_ch, img_size, data_dim)
         else:
-            self.vnet_model = globals()[dyn_model_type](dim=2*data_dim, out_dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)
+            self.vnet_model = globals()[dyn_model_type](dim=2*data_dim, out_dim=data_dim, time_varying=True, n_hidden=depth_mlp, w=width_mlp)  # CHANGED: added out_dim=data_dim
         
         #create encoder net 
         if encoder_type in ['Latent_LargeCNN_VAE', "Adapted_Latent_LargeCNN_VAE"]:
@@ -1395,7 +1433,8 @@ class  VFMToyNet(torch.nn.Module):
         
         # now get u, v
         u = self.unet_model(x0_tau, taus)
-        v = self.vnet_model(torch.cat([xt_tau, x0_tau], dim=-1), taus)
+        # MODIFIED: concatenate xt_tau and x0_tau to provide starting point information to dynamics net
+        v = self.vnet_model(torch.cat([xt_tau, x0_tau], dim=-1), taus)  # CHANGED: concatenate xt_tau and x0_tau
         
         return u0_tau, ut_tau, u, v, x0_0, xdt_0
             
