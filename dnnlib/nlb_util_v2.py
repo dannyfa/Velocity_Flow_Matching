@@ -77,8 +77,9 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers
         'train':[],
         'val':[],
     }
+    data_timestamp_interval = (dataset.data.index[1] - dataset.data.index[0]).total_seconds()
 
-    trial_info_names = ['trial_type', 'trial_version', 'maze_id', 'success',
+    trial_info_names = ['trial_type', 'start_time', 'stop_time', 'trial_version', 'maze_id', 'success',
                         'target_on_time', 'go_cue_time', 'move_onset_time', 
                         'rt', 'delay', 'num_targets', 'target_pos',
                         'num_barriers', 'barrier_pos', 'active_target']
@@ -95,15 +96,40 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers
 
     for trial_ind, (trial_start, trial_end, label) in enumerate(zip(trial_start_times, trial_end_times, train_val_label)):
         in_trial_index = (smoothed_spikes.time_stamp >= trial_start) & (smoothed_spikes.time_stamp <= trial_end)
+        in_trial_data = smoothed_spikes_numpy[in_trial_index, :]
+        isnan = np.isnan(in_trial_data[:, 0])
+
+        lead_end = np.argmax(~isnan)
+
+        tail_start_reverse = np.argmax(~isnan[::-1])
+        tail_start = len(in_trial_data[:, 0]) - tail_start_reverse  
+        nan_index_single_trial = [lead_end, tail_start]
+
+        # cell_same = np.all(nan_index_single_trial == nan_index_single_trial[0], axis=1)
+        # all_same = np.all(cell_same == 1)#just for checking of the nan ends and start at the same index in each trial
         
+        excluded_nan_single_trial = in_trial_data[nan_index_single_trial[0]:nan_index_single_trial[1], :]
+        #print(np.sum(np.isnan(excluded_nan_single_trial[0, :])) == 0, np.sum(np.isnan(excluded_nan_single_trial[-1, :])) == 0)#should be all false
         # only keeping the train and val data
         if label in splitted_data:
-            splitted_data[label].append(smoothed_spikes_numpy[in_trial_index, :])
+            splitted_data[label].append(excluded_nan_single_trial)
+            # print(np.any(np.isnan(excluded_nan_single_trial)))
             for name in behavior_names:
-                metadata[label]['behavior'][name].append(dataset.data.loc[in_trial_index][name].to_numpy())
+                in_trial_behavior = dataset.data.loc[in_trial_index][name].to_numpy()
+                metadata[label]['behavior'][name].append(in_trial_behavior[nan_index_single_trial[0]:nan_index_single_trial[1],:])
             for name in trial_info_names:
-                metadata[label]['trial_info'][name].append(nwbfile_stream.trials[trial_ind][name].item())
-    
+                if name == 'start_time':
+                    metadata[label]['trial_info'][name].append(nwbfile_stream.trials[trial_ind][name].item() + data_timestamp_interval*lead_end)
+                elif name == 'stop_time':
+                    metadata[label]['trial_info'][name].append(nwbfile_stream.trials[trial_ind][name].item() - data_timestamp_interval*(tail_start_reverse-1))
+                else:
+                    metadata[label]['trial_info'][name].append(nwbfile_stream.trials[trial_ind][name].item())
+        
+        # print('old_start_time = ', nwbfile_stream.trials[trial_ind]['start_time'].item(), 'old_end_time = ', nwbfile_stream.trials[trial_ind]['stop_time'].item())
+        # print('trial_length =', np.shape(in_trial_behavior[nan_index_single_trial[0]:nan_index_single_trial[1],:]), 'start_time = ', nwbfile_stream.trials[trial_ind]['start_time'].item() + data_timestamp_interval*lead_end, 
+        #       'end_time = ', nwbfile_stream.trials[trial_ind]['stop_time'].item() - data_timestamp_interval*(tail_start_reverse-1),
+        #       'nan_index = ', nan_index_single_trial)
+        
     train_dataset = ToyDsetDynamics(splitted_data['train'], dt=1e-3, nForward=nForward)
     val_dataset = ToyDsetDynamics(splitted_data['val'], dt=1e-3, nForward=nForward)
 
@@ -113,6 +139,7 @@ def loader_mc_maze_with_behavior(spike_smooth_ms = 40, nForward = 1, num_workers
     io_stream.close()
 
     return train_dataloader, val_dataloader, splitted_data['train'], splitted_data['val'], metadata
+
 
 
 #### Loaders for Brodmann's area 2 recordings -- center-out reach with bump task #############
