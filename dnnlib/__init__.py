@@ -4,3 +4,5 @@
 # work. If not, see http://creativecommons.org/licenses/by-nc-sa/4.0/
 
 from .util import EasyDict, make_cache_dir_path
+from .util_v2 import EasyDict, make_cache_dir_path
+from .util_v4 import EasyDict, make_cache_dir_path
