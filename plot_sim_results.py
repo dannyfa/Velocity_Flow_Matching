@@ -35,8 +35,14 @@ def plotTraj(data, data_sim = None, title = None):
 
 def generate_traj(dyn_net, dset_samples, n_step, tau, lag_samples, device, lag,
                   include_x0_tau = False,
-                  oracle = False, lag_cov_list_pre = None, flow_net = None):
+                  oracle = False, lag_cov_list_pre = None, flow_net = None, clamp_range = None):
 
+    if clamp_range is not None:
+        if len(clamp_range.shape) == 2:
+            clamp_range = torch.from_numpy(clamp_range).to(device).float()
+            full_min = clamp_range[:, 0].tile(lag+1).unsqueeze(0)
+            full_max = clamp_range[:, 1].tile(lag+1).unsqueeze(0)
+        
     lag_cov = torch.stack([
         torch.tensor(lag_samples[j][0], dtype=torch.float32)
         for j in range(len(lag_samples))
@@ -82,7 +88,12 @@ def generate_traj(dyn_net, dset_samples, n_step, tau, lag_samples, device, lag,
             else:
                 assert tau < 1.0, "lag_cov_list_pre is only expected for latent τ."
                 lag_cov = lag_cov_list_pre[ii]
-            
+        if clamp_range is not None:
+            if len(clamp_range.shape) == 1:
+                lag_cov = lag_cov.clamp(min=clamp_range[0], max=clamp_range[1])
+            else:
+                lag_cov = torch.clamp(lag_cov, min=full_min, max=full_max)
+        
         traj = util.calc_dyn_trajectories(dyn_net, x0_tmp,
                                           tau, x0_tau=None, 
                                           covariates=None,
@@ -91,6 +102,11 @@ def generate_traj(dyn_net, dset_samples, n_step, tau, lag_samples, device, lag,
                                           include_x0_tau=include_x0_tau, nt=2)
 
         x_next = traj[-1]                    # [B,D]
+        if clamp_range is not None:
+            if len(clamp_range.shape) == 1:
+                x_next = x_next.clamp(min=clamp_range[0], max=clamp_range[1])
+            else:
+                x_next = torch.clamp(x_next, min=clamp_range[:, 0].unsqueeze(0), max=clamp_range[:,1].unsqueeze(0))
         curr_tau_pts = x_next.unsqueeze(1)   # [B,1,D]
         curr_tau_trajs.append(curr_tau_pts.cpu().numpy())
         if (not oracle) and (lag_cov_list_pre is None):
