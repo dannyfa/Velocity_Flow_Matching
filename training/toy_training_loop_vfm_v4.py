@@ -89,10 +89,6 @@ def training_loop(
     # Use provided dataset_obj and dset_samples
     dist.print0('Using provided dataset...')
     
-    # Save the provided dataset and samples
-#     np.savez(os.path.join(run_dir, 'dataset_samples.npz'), samples=dset_samples)
-    np.savez(os.path.join(run_dir, 'dataset_samples.npz'), samples=np.array(dset_samples, dtype=object))
-    torch.save(dataset_obj, os.path.join(run_dir, 'dataset_obj.pth'))
     
     dataset_sampler = misc.InfiniteSampler(dataset=dataset_obj, rank=dist.get_rank(), num_replicas=dist.get_world_size(), seed=seed)  
     dataset_iterator = iter(torch.utils.data.DataLoader(dataset=dataset_obj, sampler=dataset_sampler, \
@@ -122,7 +118,7 @@ def training_loop(
                 if hasattr(net, 'dim_cov_static') and net.dim_cov_static > 0:
                     cov_static = torch.zeros([batch_gpu, net.dim_cov_static], device=device)
                 misc.print_module_summary(net, [images, images, ts, ts, 1e-3, test_flow_matcher, test_flow_matcher,
-                                                cov_dynamic_0, cov_dynamic_dt, cov_static], max_nesting=2)  # CHANGED: Added cov_static to inputs
+                                                cov_dynamic_0, cov_dynamic_dt, cov_static], max_nesting=2)  
             else:
                 misc.print_module_summary(net, [images, images, ts, ts, 1e-3, test_flow_matcher, test_flow_matcher],
                                           max_nesting=2)
@@ -296,6 +292,7 @@ def training_loop(
         
         fields += [f"cmp_loss {tot_separate_losses[0].item():<7.3f}"]
         fields += [f"dyn_loss {tot_separate_losses[1].item():<7.3f}"]
+        fields += [f"con_loss {tot_separate_losses[2].item():<7.3f}"]
         fields += [f"total_loss {tot_scalar_loss:<7.3f}"]
         
 

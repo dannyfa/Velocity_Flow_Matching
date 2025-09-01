@@ -35,6 +35,8 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--use_static_covariates',   help='Whether to use static covariates (if available)', is_flag=True)
 @click.option('--dim_cov_dynamic',         help='Dimension of dynamic covariates [default: inferred from data]', metavar='INT', type=int)
 @click.option('--dim_cov_static',          help='Dimension of static covariates [default: inferred from data]', metavar='INT', type=int)
+@click.option('--lag_k',                   help='Lag order k to build lag-k covariate matrix (>=0)', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
+
 
 # Balls dset options (kept for compatibility, but unused if not 'balls')
 @click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT', type=int, default=28, show_default=True)
@@ -55,8 +57,11 @@ warnings.filterwarnings('ignore', 'Grad strides do not match bucket view strides
 @click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE|Latent_LargeCNN_VAE|Adapted_Latent_LargeCNN_VAE', type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE', 'Latent_LargeCNN_VAE', 'Adapted_Latent_LargeCNN_VAE']), default='Latent_MLP_VAE', show_default=True)
 @click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT', type=int, default=2, show_default=True)
 @click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT', type=int, default=10, show_default=True)
-@click.option('--mlp_depth',               help='Number of hidden layers in MLP flow, dyn nets', metavar='INT', type=int, default=2, show_default=True)
-@click.option('--mlp_width',               help='Width of each hidden layer in MLP flow,dyn nets', metavar='INT', type=int, default=64, show_default=True)
+@click.option('--mlp_depth_cmp',               help='Number of hidden layers in MLP, compression flow nets', metavar='INT', type=int, default=2, show_default=True)
+@click.option('--mlp_width_cmp',               help='Width of each hidden layer in MLP, compression flow nets', metavar='INT', type=int, default=64, show_default=True)
+@click.option('--mlp_depth_dyn',               help='Number of hidden layers in MLP, dynamic flow nets', metavar='INT', type=int, default=2, show_default=True)
+@click.option('--mlp_width_dyn',               help='Width of each hidden layer in MLP, dynamic flow nets', metavar='INT', type=int, default=64, show_default=True)
+
 
 # Training Hyperparameters.
 @click.option('--duration',                help='Training duration', metavar='MIMG', type=click.FloatRange(min=0, min_open=True), default=7000, show_default=True)
@@ -132,15 +137,70 @@ def main(**kwargs):
                 cov_static_samples = cov_static_samples.tolist()
             except:
                 pass
+
+
+    # Build lag-k covs, truncate, and concatenate
+    k = int(max(0, opts.lag_k))
+    min_T = min(np.asarray(tr).shape[0] for tr in dset_samples)
+    if k >= min_T:
+        raise click.ClickException(f'lag_k={k} must be < min trajectory length ({min_T}).')
+
+    def _make_lag_cov_list(trajs, k_):
+        lag_list = []
+        for X in trajs:
+            X = np.asarray(X)
+            T, D = X.shape
+            if k_ == 0:
+                lag = X.copy()
+            else:
+                blocks = [X[k_-j : T-j] for j in range(k_ + 1)]
+                lag = np.concatenate(blocks, axis=1)
+            lag_list.append(lag)
+        return lag_list
+        
+    # 1) construct lag-k cov matrix from original samples
+    lag_cov_list = _make_lag_cov_list(dset_samples, k)
     
-    # Create dataset object with covariate support
-    dataset_obj = dnnlib.util_v4.ToyDsetDynamics(
-        dset_samples, opts.dt, nForward=1, 
-        cov_dynamic_data=cov_dynamic_samples,
-        cov_static_data=cov_static_samples
-    )
+    # 2) truncate dset_samples
+    dset_samples_trunc = [np.asarray(X)[k:] for X in dset_samples]
+    
+    # 3) truncate cov_dynamic
+    cov_dynamic_trunc = cov_dynamic_samples
+    if cov_dynamic_samples is not None:
+        if isinstance(cov_dynamic_samples, list):
+            cov_dynamic_trunc = [np.asarray(C)[k:] for C in cov_dynamic_samples]  # keep dim, shorten time
 
+    # 4) truncate cov_static if it is a list (time-indexed); if ndarray (per-traj), broadcast
+    if cov_static_samples is None:
+        cov_static_new = lag_cov_list
+    elif isinstance(cov_static_samples, list):
+        cov_static_new = []
+        for S, L in zip(cov_static_samples, lag_cov_list):
+            S_trunc = np.asarray(S)[k:]
+            cov_static_new.append(np.concatenate([S_trunc, L], axis=1))
+    else:
+        cov_static_new = []
+        for i, L in enumerate(lag_cov_list):
+            Prow = cov_static_samples[i]
+            S_broadcast = np.repeat(Prow[None, :], L.shape[0], axis=0)
+            cov_static_new.append(np.concatenate([S_broadcast, L], axis=1))
 
+    data_outdir = os.path.join(opts.outdir, 'data')
+    os.makedirs(data_outdir, exist_ok=True)
+    np.savez(os.path.join(data_outdir, 'dataset_samples.npz'), samples=np.array(dset_samples_trunc, dtype=object))
+    if cov_dynamic_trunc is not None:
+        np.savez(os.path.join(data_outdir, 'cov_dynamic_samples.npz'), samples=np.array(cov_dynamic_trunc, dtype=object))
+    np.savez(os.path.join(data_outdir, 'lag_cov_list.npz'), samples=np.array(lag_cov_list, dtype=object))
+    np.savez(os.path.join(data_outdir, 'cov_static_new.npz'), samples=np.array(cov_static_new, dtype=object))
+    dist.print0(f"Saved processed data to: {data_outdir}")
+    
+    dset_samples = dset_samples_trunc
+    cov_dynamic_samples = cov_dynamic_trunc
+    cov_static_samples = cov_static_new
+
+    # dist.print0(dset_samples[0].shape)
+    # dist.print0(cov_dynamic_samples[0].shape)
+    # dist.print0(cov_static_samples[0].shape)
     
     # Infer data_dim from loaded data
     opts.data_dim = dset_samples[0][0].shape[0]
@@ -152,9 +212,7 @@ def main(**kwargs):
 
     if opts.dim_cov_static is None:
         if cov_static_samples is not None:
-            opts.dim_cov_static = (cov_static_samples.shape[1] 
-                                   if isinstance(cov_static_samples, np.ndarray)
-                                   else cov_static_samples[0][0].shape[0])
+            opts.dim_cov_static = cov_static_samples[0].shape[1]
         else:
             opts.dim_cov_static = 0
 
@@ -168,6 +226,14 @@ def main(**kwargs):
     balls_dset_specs = dnnlib.EasyDict(img_shape=[opts.data_imgshape, opts.data_imgshape], radius=opts.data_radius, blur=opts.data_blur) if opts.data_name.lower()=='balls' else None
     c.dataset_kwargs = dnnlib.EasyDict(dset_name=opts.data_name, dt=opts.dt, balls_dset_specs=balls_dset_specs)
     c.dataset_kwargs.n_trajs = inferred_n_trajs
+
+    # Create dataset object with covariate support
+    dataset_obj = dnnlib.util_v4.ToyDsetDynamics(
+        dset_samples, opts.dt, nForward=1, 
+        cov_dynamic_data=cov_dynamic_samples,
+        cov_static_data=cov_static_samples
+    )
+
     c.dataset_obj = dataset_obj
     c.dset_samples = dset_samples
     c.cov_dynamic_samples = cov_dynamic_samples
@@ -197,8 +263,10 @@ def main(**kwargs):
         conv_embed_dim=256, 
         data_dim=working_data_dim, 
         dims_to_keep=opts.dims_to_keep, 
-        depth_mlp=opts.mlp_depth, 
-        width_mlp=opts.mlp_width, 
+        depth_mlp_cmp=opts.mlp_depth_cmp, 
+        width_mlp_cmp=opts.mlp_width_cmp, 
+        depth_mlp_dyn=opts.mlp_depth_dyn, 
+        width_mlp_dyn=opts.mlp_width_dyn,
         depth_encoder=opts.encoder_depth, 
         width_encoder=opts.encoder_width, 
         cd_eps=opts.eps, 
@@ -275,6 +343,7 @@ def main(**kwargs):
     dist.print0(f'Data dimension:          {opts.data_dim}')
     dist.print0(f'Dynamic covariate dimension:     {opts.dim_cov_dynamic}')
     dist.print0(f'Static covariate dimension:      {opts.dim_cov_static}')
+    dist.print0(f'Lag k used:               {opts.lag_k}')
     dist.print0(f'Include x0_tau:          {opts.include_x0_tau}')
     dist.print0(f'Number of GPUs:          {dist.get_world_size()}')
     dist.print0(f'Batch size:              {c.batch_size}')

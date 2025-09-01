@@ -21,6 +21,8 @@ from torch.nn.functional import silu
 import torch.nn as nn
 import os
 from torch_cfm.models.unet.unet import UNetModelWrapper 
+# import torch.nn.functional as F
+# import math
 
 #----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
@@ -328,6 +330,31 @@ class ToyMLP(torch.nn.Module):
     def forward(self, x, t):
         return self.net(torch.cat([x, t[:, None]], dim=-1))
 
+# class ToyMLP(nn.Module):
+#     def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False):
+#         super().__init__()
+#         self.time_varying = time_varying
+#         if out_dim is None:
+#             out_dim = dim
+
+#         net = [nn.Linear(dim + (1 if time_varying else 0), w), nn.SiLU()] # calmer than SELU in practice
+#         for _ in range(n_hidden):
+#             net.append(nn.Linear(w, w))
+#             net.append(nn.SiLU())
+#         out = nn.Linear(w, out_dim)
+#         net.append(out)
+#         self.net = nn.Sequential(*net)
+
+#         # 0 initialization
+#         nn.init.zeros_(out.weight)
+#         nn.init.zeros_(out.bias)
+
+#     def forward(self, x, t):
+#         return self.net(torch.cat([x, t[:, None]], dim=-1))
+
+
+
+
 # class ToyMLP(torch.nn.Module):
 #     def __init__(self, dim, out_dim=None, n_hidden=2, w=64, time_varying=False, dropout_rate=0.1):
 #         super().__init__()
@@ -345,6 +372,7 @@ class ToyMLP(torch.nn.Module):
 #         self.net = torch.nn.Sequential(*net)
 #     def forward(self, x, t):
 #         return self.net(torch.cat([x, t[:, None]], dim=-1))
+
 
 
 #----------------------------------------------------------------------------
@@ -647,7 +675,8 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
     self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
       
     #general linear layer before extracting mu, d, u
-    self.fc1 = torch.nn.Linear(128*2*2, 100)
+    self.gap = torch.nn.AdaptiveAvgPool2d((2, 2))
+    self.fc1 = torch.nn.Linear(128 * 2 * 2, 100)
       
     #mu layer 
     self.mu = torch.nn.Linear(100, input_size)
@@ -666,7 +695,9 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
     h1 = silu(self.gnorm1(self.conv1(x)))      
     h2 = silu(self.gnorm2(self.conv2(h1)))      
     h3 = silu(self.gnorm3(self.conv3(h2)))
-
+    h3 = self.gap(h3)
+    h4 = self.fc1(h3.reshape(x.shape[0], -1))
+      
     # Extract mu, u, d
     h4 = self.fc1(h3.reshape(x.shape[0], -1))
     mu = self.mu(h4)
@@ -1301,12 +1332,21 @@ class EDMPrecond(torch.nn.Module):
 #Def network class for VFM
 
 @persistence.persistent_class
-class ConvVNetWrapper(torch.nn.Module):
+class ConvVNetWrapper(nn.Module):
     """
     Wrapper for Conv-based dynamics networks to handle concatenated inputs including
     xt_tau, optionally x0_tau, and optionally covariates.
+
+    - Image data (data_dim == img_ch * img_size * img_size):
+        * If include_x0_tau: concat xt & x0 along channels and fuse via 1x1 conv.
+        * Covariates (dynamic/static) are projected to a per-channel bias and added to the image.
+        * Pass (B, C, H, W) directly to base_model (no flattening).
+
+    - Non-image data:
+        * Concatenate available vectors and project back to data_dim via Linear, then pass to base_model.
     """
-    def __init__(self, base_model, img_ch, img_size, data_dim, include_x0_tau, dim_cov_dynamic, dim_cov_static):
+    def __init__(self, base_model, img_ch, img_size, data_dim,
+                 include_x0_tau, dim_cov_dynamic, dim_cov_static):
         super().__init__()
         self.base_model = base_model
         self.img_ch = img_ch
@@ -1315,66 +1355,84 @@ class ConvVNetWrapper(torch.nn.Module):
         self.include_x0_tau = include_x0_tau
         self.dim_cov_dynamic = dim_cov_dynamic
         self.dim_cov_static = dim_cov_static
-        
-        # Check if data is actually image data
-        self.is_image_data = (data_dim == img_ch * img_size * img_size)
-        
-        # Calculate total input dimension
-        total_input_dim = data_dim  # xt_tau
-        if include_x0_tau:
-            total_input_dim += data_dim  # x0_tau
-        if dim_cov_dynamic > 0:
-            total_input_dim += dim_cov_dynamic  # dynamic covariates
-        if dim_cov_static > 0:
-            total_input_dim += dim_cov_static  # static covariates
-        
-        if self.is_image_data and include_x0_tau:
-            # Use 1x1 convolution for image data when x0_tau is included
-            self.channel_projection = torch.nn.Conv2d(2 * img_ch, img_ch, kernel_size=1)
-            # Linear layer to incorporate covariates after convolution
-            total_cov_dim = dim_cov_dynamic + dim_cov_static
-            if total_cov_dim > 0:
-                self.covariate_projection = torch.nn.Linear(data_dim + total_cov_dim, data_dim)
-        else:
-            # For non-image data or when not including x0_tau, use linear projection
-            self.linear_projection = torch.nn.Linear(total_input_dim, data_dim)
-    
-    def forward(self, xt_tau, x0_tau, cov_dynamic, cov_static, t):
-        batch_size = xt_tau.shape[0]
-        
-        if self.is_image_data and self.include_x0_tau:
-            xt_tau_img = xt_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
-            x0_tau_img = x0_tau.reshape(batch_size, self.img_ch, self.img_size, self.img_size)
-            concat_img = torch.cat([xt_tau_img, x0_tau_img], dim=1)
-            projected_img = self.channel_projection(concat_img)
-            projected_flat = projected_img.reshape(batch_size, -1)
 
-            # Handle covariates
-            covariates_list = []
-            if self.dim_cov_dynamic > 0 and cov_dynamic is not None:
-                covariates_list.append(cov_dynamic)
-            if self.dim_cov_static > 0 and cov_static is not None:
-                covariates_list.append(cov_static)
-            
-            if covariates_list:
-                combined_covariates = torch.cat(covariates_list, dim=-1)
-                combined = torch.cat([projected_flat, combined_covariates], dim=-1)
-                projected_flat = self.covariate_projection(combined)
-            
-            
+        # Image vs non-image
+        self.is_image_data = (data_dim == img_ch * img_size * img_size)
+        self.total_cov_dim = (dim_cov_dynamic or 0) + (dim_cov_static or 0)
+
+        if self.is_image_data:
+            self.channel_projection = None
+            if include_x0_tau:
+                self.channel_projection = nn.Conv2d(2 * img_ch, img_ch, kernel_size=1)
+
+            # Map covariates to per-channel bias (B, total_cov) -> (B, C)
+            self.cov_to_bias = None
+            if self.total_cov_dim > 0:
+                self.cov_to_bias = nn.Linear(self.total_cov_dim, img_ch)
         else:
-            inputs = [xt_tau]
-            if self.include_x0_tau and x0_tau is not None:
-                inputs.append(x0_tau)
-            if self.dim_cov_dynamic > 0 and cov_dynamic is not None:
-                inputs.append(cov_dynamic)
-            if self.dim_cov_static > 0 and cov_static is not None:
-                inputs.append(cov_static)
-            combined = torch.cat(inputs, dim=-1) if len(inputs) > 1 else xt_tau
-            projected_flat = self.linear_projection(combined)
-        
-        # Pass through the base model
-        return self.base_model(projected_flat, t)
+            # Non-image: concat vectors then project back to data_dim
+            total_input_dim = data_dim
+            if include_x0_tau:
+                total_input_dim += data_dim
+            if (dim_cov_dynamic or 0) > 0:
+                total_input_dim += dim_cov_dynamic
+            if (dim_cov_static or 0) > 0:
+                total_input_dim += dim_cov_static
+            self.linear_projection = nn.Linear(total_input_dim, data_dim)
+
+    def forward(self, xt_tau, x0_tau, cov_dynamic, cov_static, t):
+        """
+        xt_tau: (B, data_dim)
+        x0_tau: (B, data_dim) or None
+        cov_dynamic: (B, dim_cov_dynamic) or None
+        cov_static:  (B, dim_cov_static)  or None
+        t: conditioning (shape as expected by base_model)
+        """
+        B = xt_tau.shape[0]
+
+        if self.is_image_data:
+            # Reshape vectors to images
+            xt_img = xt_tau.view(B, self.img_ch, self.img_size, self.img_size)
+
+            if self.include_x0_tau and (x0_tau is not None):
+                x0_img = x0_tau.view(B, self.img_ch, self.img_size, self.img_size)
+                if self.channel_projection is None:
+                    # Fallback: if not defined, just concat without projection.
+                    # But under normal config, channel_projection exists.
+                    img_feat = torch.cat([xt_img, x0_img], dim=1)
+                else:
+                    img_feat = self.channel_projection(torch.cat([xt_img, x0_img], dim=1))
+            else:
+                img_feat = xt_img
+
+            # Combine covariates -> per-channel bias and add to image features
+            if self.total_cov_dim > 0 and (cov_dynamic is not None or cov_static is not None):
+                cov_list = []
+                if (self.dim_cov_dynamic or 0) > 0 and cov_dynamic is not None:
+                    cov_list.append(cov_dynamic)
+                if (self.dim_cov_static or 0) > 0 and cov_static is not None:
+                    cov_list.append(cov_static)
+                if cov_list:
+                    cov = torch.cat(cov_list, dim=-1)  # (B, total_cov_dim)
+                    if self.cov_to_bias is not None:
+                        cov_bias = self.cov_to_bias(cov).view(B, self.img_ch, 1, 1)  # (B,C,1,1)
+                        img_feat = img_feat + cov_bias
+
+            # Pass image-shaped tensor to the conv base model
+            return self.base_model(img_feat, t)
+
+        # ---- Non-image path (unchanged behavior) ----
+        inputs = [xt_tau]
+        if self.include_x0_tau and (x0_tau is not None):
+            inputs.append(x0_tau)
+        if (self.dim_cov_dynamic or 0) > 0 and cov_dynamic is not None:
+            inputs.append(cov_dynamic)
+        if (self.dim_cov_static or 0) > 0 and cov_static is not None:
+            inputs.append(cov_static)
+
+        combined = torch.cat(inputs, dim=-1) if len(inputs) > 1 else xt_tau
+        projected = self.linear_projection(combined)
+        return self.base_model(projected, t)
 
 #-------------------------------------------------------------------------------------
 #Def network class for VFM
@@ -1396,8 +1454,10 @@ class VFMToyNet(torch.nn.Module):
                  encoder_type = "Latent_MLP_VAE",
                  depth_encoder = 2,
                  width_encoder = 10,
-                 depth_mlp = 2,
-                 width_mlp = 64,
+                 depth_mlp_cmp = 2,
+                 width_mlp_cmp = 64,
+                 depth_mlp_dyn = 2,
+                 width_mlp_dyn = 64,
                  cd_eps = 1.0,
                  img_size = 28,
                  in_ch=1,
@@ -1422,7 +1482,7 @@ class VFMToyNet(torch.nn.Module):
                                                          input_size=data_dim)
         else:
             self.unet_model = globals()[flow_model_type](dim=data_dim, time_varying=True, 
-                                                         n_hidden=depth_mlp, w=width_mlp)
+                                                         n_hidden=depth_mlp_cmp, w=width_mlp_cmp)
         
         # Calculate input dimension for dynamics net
         vnet_input_dim = data_dim  # xt_tau
@@ -1445,8 +1505,8 @@ class VFMToyNet(torch.nn.Module):
         else:
             # For MLP architectures
             self.vnet_model = globals()[dyn_model_type](dim=vnet_input_dim, out_dim=data_dim, 
-                                                        time_varying=True, n_hidden=depth_mlp, 
-                                                        w=width_mlp)
+                                                        time_varying=True, n_hidden=depth_mlp_dyn, 
+                                                        w=width_mlp_dyn)
         
         # Create encoder net
         if encoder_type in ['Latent_LargeCNN_VAE', "Adapted_Latent_LargeCNN_VAE"]:
