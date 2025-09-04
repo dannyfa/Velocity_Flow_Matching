@@ -436,7 +436,67 @@ def plot_pc_time_series(
     plt.tight_layout(rect=[0.02, 0.18 if use_cats else 0.02, 0.98, 0.98])
     plt.show()
 
+def plot_2d_hand_trajectories(
+    hand_pos_sel,                 # list of arrays [T_k, 2]
+    trial_indices=None,           # None => plot all trials
+    trial_type_use=None,          # labels for *plotted* trials (same length as trial_indices or all)
+    linewidth=1.6,
+    alpha=0.9,
+    fig_w=6,
+    fig_h=6,
+    title="2D hand trajectories",
+):
+    # ---- decide which trials to plot ----
+    if trial_indices is None:
+        idx_list = list(range(len(hand_pos_sel)))
+    else:
+        idx_list = list(trial_indices)
 
+    # ---- prepare categorical coloring (optional) ----
+    use_cats = trial_type_use is not None
+    if use_cats:
+        trial_type_use = list(trial_type_use)
+        if len(trial_type_use) != len(idx_list):
+            raise ValueError("trial_type_use must have the same length as the number of plotted trials.")
+        # preserve first-seen category order
+        cats = []
+        for lab in trial_type_use:
+            if lab not in cats:
+                cats.append(lab)
+        K = max(1, len(cats))
+        base = plt.get_cmap("tab20", K) if K <= 20 else plt.get_cmap("hsv", K)
+        cmap = ListedColormap([base(i) for i in range(K)])
+        norm = BoundaryNorm(np.arange(K+1) - 0.5, K)
+        cat_to_i = {c: i for i, c in enumerate(cats)}
+
+    # ---- plot ----
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    for j, idx in enumerate(idx_list):
+        arr = hand_pos_sel[idx]
+        if arr is None or len(arr) == 0:
+            continue
+        if use_cats:
+            ci = cat_to_i[trial_type_use[j]]
+            color = cmap(norm(ci))
+        else:
+            color = "k"
+        ax.plot(arr[:, 0], arr[:, 1], lw=linewidth, alpha=alpha, color=color)
+
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.set_xlabel("X"); ax.set_ylabel("Y"); ax.grid(True, alpha=0.25)
+    ax.set_title(title)
+
+    # ---- bottom categorical colorbar (only if labels provided) ----
+    if use_cats:
+        fig.subplots_adjust(bottom=0.2)                 # reserve space
+        cax = fig.add_axes([0.12, 0.08, 0.76, 0.05])    # [left, bottom, width, height]
+        sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap); sm.set_array([])
+        cbar = fig.colorbar(sm, cax=cax, orientation="horizontal")
+        cbar.set_ticks(range(len(cats)))
+        cbar.set_ticklabels([str(c) for c in cats])
+        cbar.set_label("Trial type")
+
+    plt.show()
 
 
 
