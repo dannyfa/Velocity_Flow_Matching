@@ -400,18 +400,39 @@ class Latent_MLP_VAE(torch.nn.Module):
         #now construct GLOBAL u, D parameters 
         self.u = torch.nn.Parameter(torch.randn(output_size)) #dim 
         self.d = torch.nn.Parameter(torch.randn(output_size)) #dim 
+        with torch.no_grad():
+            if dims_to_keep < self.d.numel():
+                self.d[dims_to_keep:].fill_(0.1 * eps).log_()  # d = log(0.1*eps)
+
         
+        # self.d = torch.nn.Parameter(torch.empty(output_size))
+        # with torch.no_grad():
+        #     if dims_to_keep > 0:
+        #         self.d[:dims_to_keep].zero_()                 # log(1) = 0
+        #     if dims_to_keep < self.d.numel():
+        #         self.d[dims_to_keep:].fill_(0.1 * eps).log_() # log(0.1*eps)
+
+        keep_cap = 10 # let's never upper bound the dims_to_keep
         if dims_to_keep < output_size: 
-            d_max_pds = torch.ones(dims_to_keep).unsqueeze(0) 
+            d_max_pds = torch.ones(dims_to_keep).unsqueeze(0)*keep_cap 
             d_max_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * eps 
             self.d_max_diag = torch.cat([d_max_pds, d_max_cds], dim=-1) #1, dim
         else: 
-            self.d_max_diag = torch.ones(output_size).unsqueeze(0) #1, dim 
+            self.d_max_diag = torch.ones(output_size).unsqueeze(0)*keep_cap #1, dim 
         
-        #set out min val for D diag
-        #this is just to avoid chol from failing as model trains 
-        self.d_min_diag = torch.ones(output_size).unsqueeze(0)*d_min #1, dim 
-        
+        # option 1: set out min val for D diag
+        # this is just to avoid chol from failing as model trains 
+        self.d_min_diag = torch.ones(output_size).unsqueeze(0)*d_min #1, dim
+
+        # # option 2: force the perserved d larger then silent d
+        # # 1) kept dim: eps ≤ d ≤ 1, 2) compressed dim: d_min ≤ d ≤ eps
+        # if dims_to_keep < output_size:
+        #     d_min_pds = torch.ones(dims_to_keep).unsqueeze(0) * eps
+        #     d_min_cds = torch.ones(output_size - dims_to_keep).unsqueeze(0) * d_min
+        #     self.d_min_diag = torch.cat([d_min_pds, d_min_cds], dim=-1)
+        # else:
+        #     self.d_min_diag = torch.ones(output_size).unsqueeze(0) * eps
+
     def encode(self, x):
         
         mu = self.mu(x) #bs, dim 
@@ -425,7 +446,7 @@ class Latent_MLP_VAE(torch.nn.Module):
         L -= torch.diag_embed(L_diag) #remove original diagonal 
         L += torch.diag_embed(L_diag_ones) #force all diagonals to be ones 
         
-        #now setup D from global param d 
+        #now setup D from global param d
         d = torch.exp(self.d) #dim 
         d = torch.clamp(d, min=self.d_min_diag.to(x.device), max=self.d_max_diag.to(x.device)) #clip d 
         d = torch.diag_embed(d).squeeze(0) #dim, dim 

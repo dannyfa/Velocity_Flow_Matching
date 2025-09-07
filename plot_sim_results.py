@@ -5,7 +5,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import torch
 import dnnlib.util_v4 as util
 from tqdm import tqdm
-
+import pickle
 
 
 def plotTraj(data, data_sim = None, title = None):
@@ -32,7 +32,7 @@ def plotTraj(data, data_sim = None, title = None):
     plt.tight_layout()
     if title is not None:
         plt.title(title)
-    plt.show()
+    # plt.show()
 
 
 def generate_traj(dyn_net, dset_samples, n_step, tau, lag_samples, device, lag,
@@ -246,7 +246,7 @@ def plot_latent_time_series(
             cbar.set_label("Trial category")
 
     plt.tight_layout(rect=[0.02, 0.18 if use_labels else 0.02, 0.98, 0.98])
-    plt.show()
+    # plt.show()
 
 
 # def plot_latent_time_series(
@@ -602,7 +602,7 @@ def plot_mu_trajectories_gradient_steps_3d(
             cbar.set_ticklabels([str(c) for c in cats])
             cbar.set_label("Category")
 
-    plt.show()
+    # plt.show()
 
 
 # def plot_mu_trajectories_gradient_steps_3d(
@@ -888,16 +888,168 @@ def proj_to_latent(dset_samples, flow_net, tau_latent, device):
         latent_traj_list.append(latent_traj_tmp[-1,:,:].cpu().numpy())
     return latent_traj_list
 
-def latent_mu(latent_traj_list, encoder, dim_preserve, device):
+def latent_mu(latent_traj_list, encoder, dim_preserve, device, fullRes = False):
     mu_traj = []
     encoder.eval()
-    with torch.inference_mode():                      
+    with torch.inference_mode():
+        X = torch.from_numpy(latent_traj_list[0]).to(device=device, dtype=torch.float32)
+        _, d, L = encoder.to(device).encode(X)
+        loading = L @ torch.sqrt(d)
+        
         for ii in tqdm(range(len(latent_traj_list))):
             X = torch.from_numpy(latent_traj_list[ii]).to(device=device, dtype=torch.float32)  # [T, in_dim]
-            mu = encoder.to(device).mu(X)                         # [T, out_dim]
+            mu = (torch.linalg.solve(loading, X.T)).T
             mu_traj_tmp = mu[:, :dim_preserve].detach().cpu()   # [T, dim_preserve]
             mu_traj.append(mu_traj_tmp)
-    return mu_traj
+    if fullRes:
+        return mu_traj, d, L, loading
+    else:
+        return mu_traj
+
+
+# def latent_mu(latent_traj_list, encoder, dim_preserve, device):
+#     mu_traj = []
+#     encoder.eval()
+#     with torch.inference_mode():                      
+#         for ii in tqdm(range(len(latent_traj_list))):
+#             X = torch.from_numpy(latent_traj_list[ii]).to(device=device, dtype=torch.float32)  # [T, in_dim]
+#             mu = encoder.to(device).mu(X)                         # [T, out_dim]
+#             mu_traj_tmp = mu[:, :dim_preserve].detach().cpu()   # [T, dim_preserve]
+#             mu_traj.append(mu_traj_tmp)
+#     return mu_traj
+
+def list_mse_equal_weight(data_list, sim_list):
+    """
+    Returns:
+      overall_mse: float                      # mean of per-trial scalar MSEs
+      per_trial:   (n_trial,) array           # scalar MSE per trial
+      per_trial_dim: (n_trial, D) array       # MSE per trial per dimension
+    """
+    assert len(data_list) == len(sim_list), "Trial count mismatch"
+    per_trial = []
+    per_trial_dim = []
+
+    D_ref = None
+    for X, Y in zip(data_list, sim_list):
+        X = np.asarray(X, dtype=float)
+        Y = np.asarray(Y, dtype=float)
+        if X.shape != Y.shape:
+            raise ValueError(f"Shape mismatch in a trial: {X.shape} vs {Y.shape}")
+        if D_ref is None:
+            D_ref = X.shape[1]
+        elif X.shape[1] != D_ref:
+            raise ValueError(f"Inconsistent dims across trials: expected {D_ref}, got {X.shape[1]}")
+
+        diff2 = (X - Y) ** 2            # [T, D]
+        per_trial.append(diff2.mean())  # mean over time and dims
+        per_trial_dim.append(diff2.mean(axis=0))  # mean over time -> [D]
+
+    per_trial = np.asarray(per_trial)                  # [n_trial]
+    per_trial_dim = np.vstack(per_trial_dim)          # [n_trial, D]
+    overall_mse = float(per_trial.mean())             # scalar
+    overall_mse_dim = np.mean(per_trial_dim, axis=0)
+    
+    return overall_mse, per_trial, overall_mse_dim, per_trial_dim
+
+
+def mean_traj_by_labels(traj_array, label_array, round_labels=None):
+    N, T, D = traj_array.shape
+    labels = label_array
+    if round_labels is not None:
+        labels = np.round(labels.astype(float), round_labels)
+
+    unique_labels, inv, counts = np.unique(labels, axis=0, return_inverse=True, return_counts=True)
+    G = unique_labels.shape[0]
+
+    sums = np.zeros((G, T, D), dtype=np.float64)
+    np.add.at(sums, inv, traj_array)            # accumulate trial-wise
+    means = sums / counts[:, None, None]        # broadcast divide
+
+    return unique_labels, counts, means, inv
 
 
 
+def get_theta_deg(XY):
+    x = XY[:, 0]
+    y = XY[:, 1]
+    r = np.hypot(x, y)
+    theta = np.arctan2(x, y)              # <-- note: x first, y second (swapped)
+    theta = (theta + np.pi) % (2*np.pi) - np.pi
+    theta[np.isclose(theta, np.pi)] = 0.0
+    theta_deg = np.degrees(theta)
+    return theta_deg
+
+def model_gen(folder_data, folder, chk_pts, dim_preserve, clamp_range, device, useCov = False):
+    pkl_path = folder + chk_pts
+    dataset_samples = np.load(folder_data + "/dataset_samples.npz", allow_pickle=True)
+    lagRead_samples = np.load(folder_data + "/lag_cov_list.npz", allow_pickle=True)
+    if useCov:
+        cov_static_all = np.load(folder_data + "/cov_static_new.npz", allow_pickle=True)
+    
+    data_raw = dataset_samples['samples']
+    lag_raw = lagRead_samples['samples']
+    dset_samples = []
+    lag_samples = []
+
+    if useCov:
+        cov_static_raw = cov_static_all['samples']
+        covStat_samples = []
+    
+    for ii in range(len(data_raw)):
+        dset_samples.append(np.asarray(data_raw[ii], dtype=np.float64))
+        lag_samples.append(np.asarray(lag_raw[ii], dtype=np.float64))
+        if useCov:
+            covStat_samples.append(np.asarray(cov_static_raw[ii][:, 0:(cov_static_raw[ii].shape[1] - lag_raw[ii].shape[1])], dtype=np.float64))
+    
+    
+    lag = lag_samples[0].shape[1] // dset_samples[0].shape[1] - 1
+    T_min = min(arr.shape[0] for arr in dset_samples)
+    T_max = max(arr.shape[0] for arr in dset_samples)
+    
+    with open(pkl_path, 'rb') as f:
+        model_all = pickle.load(f)
+    if 'ema' in model_all: net = model_all['ema']  # EMA-stabilized model (recommended for inference/simulation)
+    else: net = model_all['net']  # Raw trained model
+    flow_net = net.unet_model  # Compressive flow (u_theta)
+    dyn_net = net.vnet_model   # Dynamics flow (v_theta)
+    encoder = net.encoder      # For latent proposals
+    
+    
+    _, d, L, loading = latent_mu(dset_samples, encoder, dim_preserve, device, fullRes = True)
+    
+    if useCov:
+        traj_sim_tau1, lag_cov_list = generate_traj_cov(dyn_net.to(device), dset_samples,
+                                                        n_step = T_max, tau = 1.0,
+                                                        lag_samples = lag_samples,
+                                                        device = device, lag = lag,
+                                                        include_x0_tau = False,
+                                                        covStat_samples = covStat_samples,
+                                                        oracle = False, lag_cov_list_pre = None,
+                                                        clamp_range = clamp_range)
+        traj_sim_tau0, _ = generate_traj_cov(dyn_net.to(device), dset_samples,
+                                             n_step = T_max, tau = 0.0,
+                                             lag_samples = lag_samples,
+                                             device = device, lag = lag,
+                                             include_x0_tau = False,
+                                             covStat_samples = covStat_samples,
+                                             oracle = False, lag_cov_list_pre = lag_cov_list,
+                                             flow_net = flow_net.to(device), clamp_range = clamp_range)
+    else:
+        traj_sim_tau1, lag_cov_list = generate_traj(dyn_net.to(device), dset_samples,
+                                                    n_step = T_max, tau = 1.0,
+                                                    lag_samples = lag_samples, device = device, lag = lag,
+                                                    include_x0_tau = False,
+                                                    oracle = False, lag_cov_list_pre = None,
+                                                    clamp_range = clamp_range)
+        
+        traj_sim_tau0, _ = generate_traj(dyn_net.to(device), dset_samples,
+                                         n_step = T_max, tau = 0.0,
+                                         lag_samples = lag_samples, device = device, lag = lag,
+                                         include_x0_tau = False,
+                                         oracle = False, lag_cov_list_pre = lag_cov_list,
+                                         flow_net = flow_net.to(device), clamp_range = clamp_range)
+
+    if useCov:
+        return dset_samples, lag_samples, covStat_samples, flow_net, dyn_net, encoder, d, L, loading, traj_sim_tau1, traj_sim_tau0
+    else:
+        return dset_samples, lag_samples, flow_net, dyn_net, encoder, d, L, loading, traj_sim_tau1, traj_sim_tau0
