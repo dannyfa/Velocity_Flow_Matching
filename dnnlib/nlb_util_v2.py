@@ -338,3 +338,65 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
     io_stream.close()
 
     return train_loader,val_loader,data['train'],data['val'],metadata
+
+
+
+############ Loaders for Widefield Musall data  ##############################
+
+def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward = 1, num_workers = 1, batch_size = 128):
+    '''
+    This is a big dataset. It'll take 30-40 mins to load all the trials for mSM43 
+    You can use recon_trial_num to choose the first k trials to load.
+    '''
+    # '''
+    # U:spatial, needs to be pixel by components, the raw data is components by x by y
+    # Vc: temporal, needs to be components by frames
+    # Reconstruct widefield: needs to be Y by X by frame
+    # '''
+    splitted_data = {}
+    print('Read Vc.mat file...')
+    Vc_path=filepath
+
+    data = h5py.File(Vc_path)
+
+    spatial = data['U'][()] # components, x, y
+    temporal = data['Vc'][()] # trials, frames, components
+
+    trials = data['trials'][()]
+    #print(trials.shape) 
+    recon_widefield = []
+    trial_num = min(recon_trial_num, trials.shape[0])
+    print(f'reconstruct {trial_num} trials...')
+
+    for trial in range(trial_num):
+        t = temporal[trial,:,:]
+        recon = np.einsum('AB,BXY->AXY',t,spatial)#A: frame, B:component, XY:pixels coordinate
+        #print(recon.shape)#(frame,x,y)
+        recon_widefield.append(recon)
+
+    recon_widefield = np.array(recon_widefield)
+
+    num_trials = len(recon_widefield)
+
+    np.random.seed(440)
+    indices = np.random.permutation(num_trials)
+
+    val_size = int(val_split * num_trials)
+    train_indices = indices[val_size:]
+    val_indices = indices[:val_size]
+
+    train_data = recon_widefield[train_indices]
+    val_data = recon_widefield[val_indices]
+
+    # train_data, test_data = train_test_split(np.array(recon_widefield), test_size=0.2)# How can sklearn not working????
+    splitted_data['train'] = train_data
+    splitted_data['val'] = val_data
+        
+    train_dataset = ToyDsetDynamics(splitted_data['train'], dt=1/30, nForward=nForward)#The sampling rate of widefield is 30Hz bsed on their own code
+    val_dataset = ToyDsetDynamics(splitted_data['val'], dt=1/30, nForward=nForward)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+
+    print(f'finish loading {filepath}')
+    return train_dataloader, val_dataloader, splitted_data['train'], splitted_data['val']
