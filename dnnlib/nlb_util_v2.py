@@ -345,6 +345,8 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
 
 def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward = 1, num_workers = 1, batch_size = 128):
     '''
+    There's a copy of Musall data on Isilon, the input file will be the 'Vc.mat' file for each mouse
+    Example filepath: ~/isilon/All_Staff/mice/mSM30/10-Oct-2017/Vc.mat
     This is a big dataset. It'll take 30-40 mins to load all the trials for mSM43 
     You can use recon_trial_num to choose the first k trials to load.
     '''
