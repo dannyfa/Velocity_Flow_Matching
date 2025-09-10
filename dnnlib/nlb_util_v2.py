@@ -1,6 +1,6 @@
 import h5py
 import remfile
-
+import os
 from dandi.download import download
 from dandi.dandiapi import DandiAPIClient
 from pynwb import NWBHDF5IO
@@ -9,6 +9,8 @@ from tqdm import tqdm
 import numpy as np
 from dnnlib.util import ToyDsetDynamics
 from torch.utils.data import DataLoader
+from scipy.io import loadmat
+from skimage.transform import resize
 
 
 def validate_metadata(data,metadata):
@@ -344,12 +346,14 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
 ############ Loaders for Widefield Musall data  ##############################
 
 def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward = 1, num_workers = 1, batch_size = 128):
-    '''
-    There's a copy of Musall data on Isilon, the input file will be the 'Vc.mat' file for each mouse
-    Example filepath: ~/isilon/All_Staff/mice/mSM30/10-Oct-2017/Vc.mat
-    This is a big dataset. It'll take 30-40 mins to load all the trials for mSM43 
-    You can use recon_trial_num to choose the first k trials to load.
-    '''
+    """
+    Musall widefield dataset loader.
+
+    - The input file is the `Vc.mat` file for each mouse (stored on Isilon).
+    Example: ~/isilon/All_Staff/mice/mSM30/10-Oct-2017/Vc.mat
+    - This dataset is large: loading all trials for mouse `mSM43` may take 40 minutes.
+    - Use `recon_trial_num` to limit loading to the first *k* trials for faster preprocessing.
+    """
     # '''
     # U:spatial, needs to be pixel by components, the raw data is components by x by y
     # Vc: temporal, needs to be components by frames
@@ -402,3 +406,90 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward
 
     print(f'finish loading {filepath}')
     return train_dataloader, val_dataloader, splitted_data['train'], splitted_data['val']
+
+
+
+############ Loaders for Musall Behavior data  ##############################
+
+def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_ratio = 0.2, 
+                          frame_resize_ratio = 1.0, save_recon_video = False, nForward = 1, num_workers = 1, batch_size = 128):
+    """
+    Load a behavior video from the Musall dataset.
+
+    Notes:
+        - The mSM49 dataset has the best video.
+        - To use this dataset, set `filepath` to:
+          '~/isilon/All_Staff/mice/mSM49/SpatialDisc/30-Jul-2018/BehaviorVideo'
+
+    Parameters:
+        filepath (str): Path to the folder containing the SVD video `.mat` files.
+        start_V (int, optional): The starting frame to load. Defaults to the first frame.
+        end_V (int, optional): The ending frame to load. Defaults to the last frame.
+        frame_resize_ratio (float, optional): Ratio to shrink the video frames.
+            Lower values reduce file size but decrease video quality. Default is 1.0 (no resizing).
+
+    Returns:
+        np.ndarray: Video frames as a NumPy array of shape (frames, height, width).
+    """
+
+    # cPath = '/home/sp645/isilon/All_Staff/mice'
+    # Animal = 'mSM49/SpatialDisc'
+    # Rec = '30-Jul-2018'
+    # cPath = os.path.join(cPath, Animal, Rec, 'BehaviorVideo')
+
+    used_V = end_V - start_V
+
+    print(f'Reconstruct {used_V} frame of video..')
+    frame_x = int(240*frame_resize_ratio)
+    frame_y = int(320*frame_resize_ratio)
+    segment_frame_x = int(60*frame_resize_ratio)
+    segment_frame_y = int(80*frame_resize_ratio)
+    recon_data = np.zeros((used_V, frame_x, frame_y), dtype=np.float32)
+
+    # Loop over 16 segments
+    for i in range(1, 17):
+        name = f"SVD_Cam1-Seg{i}.mat"
+        mat = loadmat(os.path.join(folderpath, name))
+        
+        # Load U and V
+        U = mat['U']   # shape (components, pixel)
+        V = mat['V']   # shape (frames, components)
+        VU = V[start_V:end_V, :] @ U # shape (frame, pixel)
+        #print('VU shape:', VU.shape )
+        seg = VU.reshape((used_V, 60, 80),  order='F')
+        
+        if frame_resize_ratio < 1.0: 
+            seg = resize(seg, (used_V, segment_frame_x, segment_frame_y), order=1, preserve_range=True, anti_aliasing=True)
+        
+        row_start = (i-1) % 4 * segment_frame_x
+        row_end   = row_start + segment_frame_x
+        col_start = (i-1) // 4 * segment_frame_y
+        col_end   = col_start + segment_frame_y
+        
+        recon_data[:, row_start:row_end, col_start:col_end] = seg
+        print(f"Finished reconstructing segment {i}")
+    
+    if save_recon_video:
+        with h5py.File(os.path.join(folderpath, 'reconstructed_behavior_video.h5'), 'w') as f:
+            f.create_dataset('video', data=recon_data)
+
+    # subtract mean frame pixels
+    sum_image = np.sum(recon_data, axis = 0)
+    frame_count = recon_data.shape[0]
+    mean_image = sum_image / frame_count
+    mean_subtracted_recon_data = recon_data - mean_image
+    print('postprocessed video shape: (frame, x, y)', mean_subtracted_recon_data.shape)
+    
+    # split data and make loader
+    train_val_split_index = int((1-val_split_ratio)*mean_subtracted_recon_data.shape[0])
+    train_video = mean_subtracted_recon_data[:train_val_split_index]
+    val_video = mean_subtracted_recon_data[train_val_split_index:]
+
+    train_dataset = ToyDsetDynamics(train_video, dt=1/30, nForward=nForward)#The sampling rate of video is 30Hz
+    val_dataset = ToyDsetDynamics(val_video, dt=1/30, nForward=nForward)
+
+    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=True)
+    val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
+
+    print(f'finish loading videos')
+    return train_dataloader, val_dataloader, train_video, val_video
