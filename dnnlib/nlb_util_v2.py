@@ -345,10 +345,12 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
 
 ############ Loaders for Widefield Musall data  ##############################
 
-def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward = 1, num_workers = 1, batch_size = 128):
+def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, square = True,
+                            nForward = 1, num_workers = 1, batch_size = 128):
     """
     Musall widefield dataset loader.
-
+    Use either mSM30 or mSM43
+    
     - The input file is the `Vc.mat` file for each mouse (stored on Isilon).
     Example: ~/isilon/All_Staff/mice/mSM30/10-Oct-2017/Vc.mat
     - This dataset is large: loading all trials for mouse `mSM43` may take 40 minutes.
@@ -382,8 +384,24 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward
 
     recon_widefield = np.array(recon_widefield)
 
-    num_trials = len(recon_widefield)
+    print('processed widefield video shape: (trial, frame, x, y)', recon_widefield.shape)
+    
+    if square:
+        print('pad each frame to a square..')
+        #padding the video shape to 320,320
+        pad_height = (0, 0)
+        pad_width = (50, 50)
+        pad_frame = (0, 0)
+        pad_trial = (0, 0)
+        recon_widefield = np.pad(recon_widefield, (pad_trial, pad_frame, pad_height, pad_width), 
+                                            mode = 'constant', constant_values=0)
 
+
+    # replace all nan (backgground) with 0
+    recon_widefield = np.nan_to_num(recon_widefield, nan=0)
+
+    #train test split
+    num_trials = len(recon_widefield)
     np.random.seed(440)
     indices = np.random.permutation(num_trials)
 
@@ -394,7 +412,6 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward
     train_data = recon_widefield[train_indices]
     val_data = recon_widefield[val_indices]
 
-    # train_data, test_data = train_test_split(np.array(recon_widefield), test_size=0.2)# How can sklearn not working????
     splitted_data['train'] = train_data
     splitted_data['val'] = val_data
         
@@ -409,6 +426,7 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward
 
 
 
+
 ############ Loaders for Musall Behavior data  ##############################
 
 def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_ratio = 0.2, 
@@ -418,7 +436,7 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
     Load a behavior video from the Musall dataset.
 
     Notes:
-        - The mSM49 dataset has the best video.
+        - only mSM49 dataset has video we want.
         - To use this dataset, set `filepath` to:
           '~/isilon/All_Staff/mice/mSM49/SpatialDisc/30-Jul-2018/BehaviorVideo'
 
@@ -483,7 +501,7 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
     frame_count = recon_data.shape[0]
     mean_image = sum_image / frame_count
     mean_subtracted_recon_data = recon_data - mean_image
-    print('postprocessed video shape: (frame, x, y)', mean_subtracted_recon_data.shape)
+    print('processed video shape: (frame, x, y)', mean_subtracted_recon_data.shape)
     
     if square:
         print('make each frame a square..')
