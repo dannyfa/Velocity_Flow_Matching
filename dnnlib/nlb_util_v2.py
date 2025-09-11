@@ -412,7 +412,8 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, nForward
 ############ Loaders for Musall Behavior data  ##############################
 
 def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_ratio = 0.2, 
-                          frame_resize_ratio = 1.0, save_recon_video = False, nForward = 1, num_workers = 1, batch_size = 128):
+                          frame_resize_ratio = 1.0, save_recon_video = False, square = True, square_padding = True,
+                          nForward = 1, num_workers = 1, batch_size = 128):
     """
     Load a behavior video from the Musall dataset.
 
@@ -427,6 +428,10 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
         end_V (int, optional): The ending frame to load. Defaults to the last frame.
         frame_resize_ratio (float, optional): Ratio to shrink the video frames.
             Lower values reduce file size but decrease video quality. Default is 1.0 (no resizing).
+        square (boolean, optional): whether modify the video as a square
+        square_padding (boolean, optional): only used with square = True, 
+            if True, pad the video with 0 on the shorer side so x=y,
+            if False, truncate the video on the longer side so x-y
 
     Returns:
         np.ndarray: Video frames as a NumPy array of shape (frames, height, width).
@@ -480,6 +485,24 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
     mean_subtracted_recon_data = recon_data - mean_image
     print('postprocessed video shape: (frame, x, y)', mean_subtracted_recon_data.shape)
     
+    if square:
+        print('make each frame a square..')
+        if square_padding:
+            print('padding each frame..')
+            #padding the video shape to 320,320
+            pad_height = (int(40*frame_resize_ratio), int(40*frame_resize_ratio))
+            pad_width = (0, 0)
+            pad_frame = (0, 0)
+            mean_subtracted_recon_data = np.pad(mean_subtracted_recon_data, (pad_frame, pad_height, pad_width), 
+                                                mode = 'constant', constant_values=0)
+        else:   
+            print('truncate each frame..')
+            #truncate the top of the video
+            size_truncate = mean_subtracted_recon_data.shape[2] - mean_subtracted_recon_data.shape[1]
+            mean_subtracted_recon_data = mean_subtracted_recon_data[:, :, size_truncate:]
+
+    # Rotate the video pixels
+    mean_subtracted_recon_data = np.transpose(mean_subtracted_recon_data, (0, 2, 1))
     # split data and make loader
     train_val_split_index = int((1-val_split_ratio)*mean_subtracted_recon_data.shape[0])
     train_video = mean_subtracted_recon_data[:train_val_split_index]
