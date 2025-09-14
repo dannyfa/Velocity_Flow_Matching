@@ -1,11 +1,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
 from matplotlib.colors import ListedColormap, BoundaryNorm, LinearSegmentedColormap, Normalize
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 import torch
 import dnnlib.util_v4 as util
 from tqdm import tqdm
 import pickle
+from matplotlib.ticker import FuncFormatter
 
 
 def plotTraj(data, data_sim = None, title = None):
@@ -345,7 +347,7 @@ def plot_mu_trajectories_gradient_steps_3d(
     cmap=None,                    # None -> Matplotlib default (e.g., 'viridis') for continuous; tab10 for categorical
     vrange=None,                  # (vmin, vmax) for continuous labels
     cbar_label=None,               # override colorbar label (continuous labels)
-    circmap = 'twilight'
+    circmap = 'twilight',
 ):
     # ----- choose trials -----
     if trial_indices is None:
@@ -558,22 +560,47 @@ def plot_mu_trajectories_gradient_steps_3d(
     ax.set_title(title)
 
     # limits + aspect
-    rx = max(1e-12, xmax - xmin)
-    ry = max(1e-12, ymax - ymin)
-    rz_scaled = max(1e-12, zmax_scaled - zmin_scaled)
-    ax.set_xlim(xmin - 0.02*rx, xmax + 0.02*rx)
-    ax.set_ylim(ymin - 0.02*ry, ymax + 0.02*ry)
-    ax.set_zlim(zmin_scaled - 0.02*rz_scaled, zmax_scaled + 0.02*rz_scaled)
-    ax.set_box_aspect(aspect_ratio)
+    # --- Let Matplotlib autoscale using the exact points we plotted (with z scaling) ---
+    xs, ys, zs = [], [], []
+    for idx, S in trajs:
+        x = np.asarray(S[:, dims[0]], float)
+        y = np.asarray(S[:, dims[1]], float)
+        z = np.asarray(S[:, dims[2]], float) * scale_factor
+        if decimate > 1:
+            x = x[::decimate]; y = y[::decimate]; z = z[::decimate]
+        if x.size:
+            xs.append(x); ys.append(y); zs.append(z)
+    
+    if xs:  # concatenate and hand to the built-in autoscaler
+        xs = np.concatenate(xs); ys = np.concatenate(ys); zs = np.concatenate(zs)
+        ax.auto_scale_xyz(xs, ys, zs, had_data=False)
+    
+        # Optional: tiny uniform pad so points aren't glued to the box
+        dx = max(1e-12, xs.max() - xs.min())
+        dy = max(1e-12, ys.max() - ys.min())
+        dz = max(1e-12, zs.max() - zs.min())
+        pad = 0.03  # 3% visual padding
+        ax.set_xlim(xs.min() - pad*dx, xs.max() + pad*dx)
+        ax.set_ylim(ys.min() - pad*dy, ys.max() + pad*dy)
+        ax.set_zlim(zs.min() - pad*dz, zs.max() + pad*dz)
+    
+    # Aspect: keep data aspect unless you explicitly pass something else
+    try:
+        if aspect_ratio == (1, 1, 1):
+            ax.set_box_aspect('auto')   # natural data aspect (no forced cube)
+        else:
+            ax.set_box_aspect(aspect_ratio)
+    except Exception:
+        pass
 
     if elev_azim is not None:
         ax.view_init(elev=elev_azim[0], azim=elev_azim[1])
 
     # rescale tick labels on z back (if we visually scaled z)
     if scale_factor != 1.0:
-        zticks = ax.get_zticks()
-        ax.set_zticks(zticks)
-        ax.set_zticklabels([f"{z/scale_factor:.1f}" for z in zticks])
+        ax.zaxis.set_major_formatter(
+            FuncFormatter(lambda val, pos: f"{val/scale_factor:.2f}")
+        )
 
     # ----- colorbar -----
     sm = None
@@ -888,23 +915,88 @@ def proj_to_latent(dset_samples, flow_net, tau_latent, device):
         latent_traj_list.append(latent_traj_tmp[-1,:,:].cpu().numpy())
     return latent_traj_list
 
-def latent_mu(latent_traj_list, encoder, dim_preserve, device, fullRes = False):
-    mu_traj = []
-    encoder.eval()
-    with torch.inference_mode():
-        X = torch.from_numpy(latent_traj_list[0]).to(device=device, dtype=torch.float32)
-        _, d, L = encoder.to(device).encode(X)
-        loading = L @ torch.sqrt(d)
+# def latent_mu(latent_traj_list, encoder, dim_preserve, device, fullRes = False):
+#     mu_traj = []
+#     encoder.eval()
+#     with torch.inference_mode():
+#         X = torch.from_numpy(latent_traj_list[0]).to(device=device, dtype=torch.float32)
+#         _, d, L = encoder.to(device).encode(X)
+#         loading = L @ torch.sqrt(d)
         
-        for ii in tqdm(range(len(latent_traj_list))):
-            X = torch.from_numpy(latent_traj_list[ii]).to(device=device, dtype=torch.float32)  # [T, in_dim]
-            mu = (torch.linalg.solve(loading, X.T)).T
-            mu_traj_tmp = mu[:, :dim_preserve].detach().cpu()   # [T, dim_preserve]
-            mu_traj.append(mu_traj_tmp)
+#         for ii in tqdm(range(len(latent_traj_list))):
+#             X = torch.from_numpy(latent_traj_list[ii]).to(device=device, dtype=torch.float32)  # [T, in_dim]
+#             mu = (torch.linalg.solve(loading, X.T)).T
+#             mu_traj_tmp = mu[:, :dim_preserve].detach().cpu()   # [T, dim_preserve]
+#             mu_traj.append(mu_traj_tmp)
+#     if fullRes:
+#         return mu_traj, d, L, loading
+#     else:
+#         return mu_traj
+
+def latent_mu(latent_traj_list, encoder, dim_preserve, device, fullRes=False,
+              min_var=1e-20, rcond=1e-20):
+    """
+    Stable computation of latent means given X ≈ (L sqrt(D)) mu.
+    - min_var: floor for diagonal entries before rsqrt to avoid NaNs
+    - rcond:   cutoff for pseudoinverse fallback
+    """
+    import torch
+    from torch import nn
+    encoder = encoder.to(device).eval()
+
+    mu_traj = []
+    with torch.inference_mode():
+        # Get L and D once from any batch (they're global params)
+        X0 = torch.from_numpy(latent_traj_list[0]).to(device=device, dtype=torch.float32)
+        _, D, L = encoder.encode(X0)
+
+        # Extract diagonal as a vector and make it safe
+        d_vec = torch.diagonal(D) if D.ndim == 2 else D
+        d_safe = torch.clamp(d_vec, min=float(min_var))
+        inv_sqrt_d = d_safe.rsqrt()  # 1 / sqrt(d_safe)
+
+        # Helper: forward-substitution solve (unit lower-triangular)
+        def solve_mu(X_batch):
+            # X_batch: [T, in_dim]
+            XT = X_batch.T  # [in_dim, T]
+            try:
+                # Prefer torch.linalg.solve_triangular if available
+                Y = torch.linalg.solve_triangular(L, XT, upper=False, unitriangular=True)
+            except AttributeError:
+                # Fallback for older PyTorch
+                Y = torch.triangular_solve(XT, L, upper=False, unitriangular=True).solution
+            MUt = inv_sqrt_d.unsqueeze(1) * Y  # diag(inv_sqrt_d) @ Y
+            return MUt.T                        # [T, in_dim]
+
+        # Try triangular solves first
+        bad = False
+        for arr in latent_traj_list:
+            X = torch.from_numpy(arr).to(device=device, dtype=torch.float32)  # [T, in_dim]
+            mu_full = solve_mu(X)                                             # [T, in_dim]
+            if torch.isnan(mu_full).any() or torch.isinf(mu_full).any():
+                bad = True
+                break
+            mu_traj.append(mu_full[:, :dim_preserve].detach().cpu())
+
+        # Robust fallback: pseudoinverse of loading if anything went bad
+        loading = None
+        if bad:
+            # Build a *safe* loading with clamped D
+            loading = L @ torch.diag(d_safe.sqrt())
+            W = torch.linalg.pinv(loading, rcond=float(rcond))  # [in_dim, in_dim]
+            mu_traj = []  # recompute all with pinv
+            for arr in latent_traj_list:
+                X = torch.from_numpy(arr).to(device=device, dtype=torch.float32)
+                mu_full = (W @ X.T).T
+                mu_traj.append(mu_full[:, :dim_preserve].detach().cpu())
+
     if fullRes:
-        return mu_traj, d, L, loading
+        # Return D as a vector for clarity, plus L and (optional) loading if built
+        return mu_traj, d_vec, L, (loading if loading is not None else L @ torch.diag(d_vec.sqrt()))
     else:
         return mu_traj
+
+
 
 
 # def latent_mu(latent_traj_list, encoder, dim_preserve, device):
@@ -1053,3 +1145,259 @@ def model_gen(folder_data, folder, chk_pts, dim_preserve, clamp_range, device, u
         return dset_samples, lag_samples, covStat_samples, flow_net, dyn_net, encoder, d, L, loading, traj_sim_tau1, traj_sim_tau0
     else:
         return dset_samples, lag_samples, flow_net, dyn_net, encoder, d, L, loading, traj_sim_tau1, traj_sim_tau0
+
+
+
+def plot_mu_trajectories_gradient_steps_2d(
+    mu_traj_np,                   # list of arrays [T_i, D]
+    trial_indices=None,           # iterable of trial ids to plot; None => all
+    dims=(0, 1),                  # which μ dims (0-based)
+    start_color="#fdae61",
+    end_color="#313695",
+    linewidth=2.0,
+    alpha=0.5,                    # line alpha
+    start_marker_size=36,
+    start_marker_alpha=0.95,
+    end_arrow_alpha=0.95,
+    arrow_head_frac=0.03,         # head length as fraction of per-trial diagonal (data units)
+    arrow_length_ratio=0.6,       # kept for API symmetry (not used by quiver directly)
+    title="Latent trajectories (2D)",
+    fig_w=6, fig_h=6,
+    decimate=1,                   # plot every k-th step along each trial (speed-up)
+    aspect_equal=False,            # equal axes by default
+    # Labels (same semantics as your 3D version)
+    labels=None,                  # per-trial values -> color each whole trajectory
+    label_mode='auto',            # 'auto' | 'continuous' | 'categorical'
+    cmap=None,                    # None -> default (e.g., 'viridis') for continuous; tab10 for categorical
+    vrange=None,                  # (vmin, vmax) for continuous labels
+    cbar_label=None,              # override colorbar label (continuous labels)
+    circmap='twilight'            # used for angles if [-180, 180]
+):
+    # ----- choose trials -----
+    if trial_indices is None:
+        trial_indices = range(len(mu_traj_np))
+
+    # ----- gather trajectories -----
+    trajs, max_len = [], 0
+    for idx in trial_indices:
+        S = mu_traj_np[idx]
+        if S is None or getattr(S, "size", 0) == 0:
+            continue
+        trajs.append((idx, S))
+        max_len = max(max_len, S.shape[0])
+    if not trajs:
+        raise ValueError("No non-empty trials to plot.")
+
+    # ===== label mode setup (if labels given) =====
+    use_labels = labels is not None
+    lab_for = {}
+    use_cont = False
+    cats = None
+    cmap_obj = None
+    norm = None
+
+    if use_labels:
+        # map trial index -> label
+        if isinstance(labels, dict):
+            for idx, _S in trajs:
+                if idx in labels:
+                    lab_for[idx] = labels[idx]
+        else:
+            arr = np.asarray(labels)
+            for idx, _S in trajs:
+                if idx < arr.shape[0]:
+                    lab_for[idx] = arr[idx]
+
+        vals_exist = [lab_for[i] for i, _ in trajs if i in lab_for]
+        if len(vals_exist) == 0:
+            raise ValueError("Provided labels are empty or misaligned with trials.")
+
+        # decide continuous vs categorical
+        if label_mode == 'continuous':
+            use_cont = True
+        elif label_mode == 'categorical':
+            use_cont = False
+        else:  # 'auto'
+            all_int = all(isinstance(v, (int, np.integer)) for v in vals_exist)
+            all_num = all(isinstance(v, (int, float, np.integer, np.floating)) for v in vals_exist)
+            use_cont = (not all_int) and all_num
+
+        if use_cont:
+            vals = np.array(vals_exist, dtype=float)
+            if vrange is None:
+                vmin, vmax = float(np.nanmin(vals)), float(np.nanmax(vals))
+                # lock to degrees if it fits [-180, 180]
+                if (vmin >= -180-1e-6) and (vmax <= 180+1e-6):
+                    vmin, vmax = -180.0, 180.0
+            else:
+                vmin, vmax = vrange
+
+            if np.isclose(vmin, -180.0) and np.isclose(vmax, 180.0) and cmap is None:
+                cmap_obj = plt.get_cmap(circmap)
+            else:
+                default_name = plt.rcParams.get('image.cmap', 'viridis')
+                cmap_obj = plt.get_cmap(default_name if cmap is None else cmap)
+
+            norm = Normalize(vmin=vmin, vmax=vmax)
+        else:
+            # categorical palette
+            cats = []
+            for idx, _ in trajs:
+                if idx in lab_for:
+                    v = lab_for[idx]
+                    if v not in cats:
+                        cats.append(v)
+            if cmap is None:
+                base = plt.get_cmap('tab10')
+                cmap_obj = ListedColormap([base(i % base.N) for i in range(len(cats))])
+            else:
+                cmap_obj = plt.get_cmap(cmap)
+            norm = BoundaryNorm(np.arange(len(cats)+1)-0.5, len(cats))
+            cat_to_i = {c: i for i, c in enumerate(cats)}
+    else:
+        # no labels -> time-gradient colormap per trajectory
+        cmap_obj = LinearSegmentedColormap.from_list("o2b", [start_color, end_color])
+        norm = Normalize(vmin=0, vmax=(1 if max_len <= 1 else max_len - 1))
+
+    # ----- figure & axes -----
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    # ----- global limits -----
+    xmin = ymin = np.inf
+    xmax = ymax = -np.inf
+
+    # ===== plot =====
+    for idx, S in trajs:
+        x = np.asarray(S[:, dims[0]], dtype=float)
+        y = np.asarray(S[:, dims[1]], dtype=float)
+
+        # decimate
+        if decimate > 1:
+            x = x[::decimate]
+            y = y[::decimate]
+        T = x.shape[0]
+        if T == 0:
+            continue
+
+        # update bounds
+        xmin = min(xmin, np.min(x))
+        xmax = max(xmax, np.max(x))
+        ymin = min(ymin, np.min(y))
+        ymax = max(ymax, np.max(y))
+
+        # start marker color
+        if not use_labels:
+            start_col = cmap_obj(norm(0))
+        else:
+            if idx in lab_for:
+                if use_cont:
+                    start_col = cmap_obj(norm(float(lab_for[idx])))
+                else:
+                    start_col = cmap_obj(norm(cat_to_i[lab_for[idx]]))
+            else:
+                start_col = (0.6, 0.6, 0.6, 1.0)
+        ax.scatter(x[0], y[0], s=start_marker_size, marker="o",
+                   facecolor=start_col, edgecolor="black",
+                   linewidths=0.5, alpha=start_marker_alpha, zorder=3)
+
+        if T == 1:
+            continue
+
+        if not use_labels:
+            # time-gradient colored segments
+            pts = np.column_stack([x, y])               # (T, 2)
+            segs = np.stack([pts[:-1], pts[1:]], axis=1)# (T-1, 2, 2)
+            seg_steps = np.arange(segs.shape[0])        # 0..T-2
+            colors = cmap_obj(norm(seg_steps))
+            lc = LineCollection(segs, linewidths=linewidth, alpha=alpha)
+            lc.set_colors(colors)
+            ax.add_collection(lc)
+            end_col = cmap_obj(norm(T-1))
+        else:
+            # solid color per trajectory
+            if idx in lab_for:
+                if use_cont:
+                    color = cmap_obj(norm(float(lab_for[idx])))
+                else:
+                    color = cmap_obj(norm(cat_to_i[lab_for[idx]]))
+            else:
+                color = (0.6, 0.6, 0.6, 1.0)
+            ax.plot(x, y, lw=linewidth, alpha=alpha, color=color)
+            end_col = color
+
+        # end arrow
+        dx, dy = x[-1] - x[-2], y[-1] - y[-2]
+        uv = np.array([dx, dy], float)
+        nrm = float(np.linalg.norm(uv))
+
+        # compute diagonal span for head length in data units
+        rng = np.array([x.max()-x.min(), y.max()-y.min()], dtype=float)
+        diag = float(np.linalg.norm(rng))
+        head_len = max(1e-12, arrow_head_frac * (diag if diag > 0 else 1.0))
+
+        # ensure visibility (2% of local span)
+        min_head = 0.02 * max(rng.max(), 1e-12)
+        head_len = max(head_len, min_head)
+
+        if nrm < 1e-12:
+            ax.scatter(x[-1], y[-1],
+                       s=start_marker_size*0.9, marker="^",
+                       facecolor=end_col, edgecolor="black",
+                       linewidths=0.5, alpha=end_arrow_alpha, zorder=3)
+        else:
+            u_hat = uv / nrm
+            # draw arrow of length=head_len in data units
+            ax.quiver(
+                x[-1] - u_hat[0]*head_len, y[-1] - u_hat[1]*head_len,
+                u_hat[0]*head_len, u_hat[1]*head_len,
+                angles='xy', scale_units='xy', scale=1.0,
+                color=end_col, alpha=end_arrow_alpha, width=0.003
+            )
+
+    # ----- axes cosmetics -----
+    ax.set_xlabel(f"μ{dims[0]+1}")
+    ax.set_ylabel(f"μ{dims[1]+1}")
+    ax.set_title(title)
+    # limits + aspect
+    if not np.isfinite([xmin, xmax, ymin, ymax]).all():
+        xmin, xmax, ymin, ymax = -1, 1, -1, 1
+    pad_x = 0.02 * max(1e-12, xmax - xmin)
+    pad_y = 0.02 * max(1e-12, ymax - ymin)
+    ax.set_xlim(xmin - pad_x, xmax + pad_x)
+    ax.set_ylim(ymin - pad_y, ymax + pad_y)
+    if aspect_equal:
+        ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True, alpha=0.25)
+
+    # ----- colorbar -----
+    sm = None
+    if not use_labels:
+        sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm); sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, fraction=0.05, pad=0.04)
+        cbar.set_label("Step index")
+        ticks = [0, 1] if max_len <= 2 else [0, (max_len - 1)//2, max_len - 1]
+        cbar.set_ticks(ticks); cbar.set_ticklabels([str(t) for t in ticks])
+    else:
+        sm = plt.cm.ScalarMappable(cmap=cmap_obj, norm=norm); sm.set_array([])
+        if use_cont:
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.05, pad=0.04)
+            lbl = cbar_label if cbar_label is not None else "Label"
+            if isinstance(vrange, tuple):
+                vmin, vmax = vrange
+            else:
+                vmin, vmax = norm.vmin, norm.vmax
+            if np.isclose(vmin, -180) and np.isclose(vmax, 180) and cbar_label is None:
+                lbl = "Angle (deg)"
+                cbar.set_ticks([-180, -90, 0, 90, 180])
+            cbar.set_label(lbl)
+        else:
+            # bottom categorical legend-style colorbar (like your PCA example)
+            fig.subplots_adjust(bottom=0.2)
+            cax = fig.add_axes([0.12, 0.08, 0.76, 0.05])  # [left, bottom, width, height]
+            cbar = fig.colorbar(sm, cax=cax, orientation="horizontal")
+            cbar.set_ticks(range(len(cats)))
+            cbar.set_ticklabels([str(c) for c in cats])
+            cbar.set_label("Category")
+
+    return fig, ax
+
