@@ -6,3 +6,7 @@
 from .util import EasyDict, make_cache_dir_path
 from .util_v2 import EasyDict, make_cache_dir_path
 from .util_v4 import EasyDict, make_cache_dir_path
+from .util_v5 import EasyDict, make_cache_dir_path
+from .util_v6 import EasyDict, make_cache_dir_path
+
+# from .util_v5 import EasyDict, make_cache_dir_path

@@ -345,7 +345,7 @@ def make_mc_rtt_loaders(batch_size=128,nForward=1,smooth_len_ms=8,num_workers=1,
 
 ############ Loaders for Widefield Musall data  ##############################
 
-def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, square = True,
+def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, frame_resize_ratio = 1.0, square = True,
                             nForward = 1, num_workers = 1, batch_size = 128):
     """
     Musall widefield dataset loader.
@@ -363,54 +363,97 @@ def loader_musall_widefield(filepath, recon_trial_num, val_split = 0.2, square =
     # '''
     splitted_data = {}
     print('Read Vc.mat file...')
-    Vc_path=filepath
+    Vc_path = filepath
+    
+    with h5py.File(Vc_path, 'r') as f:
+        U = np.asarray(f['U'], dtype=np.float32)            # (C, H, W)
+        Vc = f['Vc']                                        # HDF5 dataset: (trials, frames, C)  (do NOT load)
+        C, H, W = U.shape
+    
+        # target size
+        new_H = max(1, int(round(H * frame_resize_ratio)))
+        new_W = max(1, int(round(W * frame_resize_ratio)))
+    
+        # resize U once, then reconstruct directly at small size
+        if frame_resize_ratio != 1.0:
+            from skimage.transform import resize
+            U_small = np.empty((C, new_H, new_W), dtype=np.float32)
+            for k in range(C):
+                U_small[k] = resize(U[k], (new_H, new_W), order=1,
+                                    preserve_range=True, anti_aliasing=True).astype(np.float32)
+        else:
+            U_small = U
+    
+        total_trials = Vc.shape[0]
+        trial_num = min(recon_trial_num, total_trials)
+        F = Vc.shape[1]
+        print(f'reconstruct {trial_num} trials...')
+    
+        # preallocate already-downscaled array
+        recon_widefield = np.empty((trial_num, F, new_H, new_W), dtype=np.float32)
+    
+        for trial in range(trial_num):
+            t = np.asarray(Vc[trial, :, :], dtype=np.float32)         # (F, C) – read just this trial
+            recon_widefield[trial] = np.tensordot(t, U_small, axes=(1, 0))
 
-    data = h5py.File(Vc_path)
-
-    spatial = data['U'][()] # components, x, y
-    temporal = data['Vc'][()] # trials, frames, components
-
-    trials = data['trials'][()]
-    #print(trials.shape) 
-    recon_widefield = []
-    trial_num = min(recon_trial_num, trials.shape[0])
-    print(f'reconstruct {trial_num} trials...')
-
-    for trial in range(trial_num):
-        t = temporal[trial,:,:]
-        recon = np.einsum('AB,BXY->AXY',t,spatial)#A: frame, B:component, XY:pixels coordinate
-        #print(recon.shape)#(frame,x,y)
-        recon_widefield.append(recon)
-
-    recon_widefield = np.array(recon_widefield)
-
+    # recon_widefield = np.array(recon_widefield)
+    # if frame_resize_ratio != 1.0:
+    #     T = recon_widefield.shape[1]
+    #     H = recon_widefield.shape[2]
+    #     W = recon_widefield.shape[3]
+    #     new_H = max(1, int(round(H * frame_resize_ratio)))
+    #     new_W = max(1, int(round(W * frame_resize_ratio)))
+    #     out = np.empty((recon_widefield.shape[0], T, new_H, new_W), dtype=np.float32)
+    #     for i in range(recon_widefield.shape[0]):
+    #         for j in range(T):
+    #             out[i, j] = resize(recon_widefield[i, j], (new_H, new_W),
+    #                                order=1, preserve_range=True,
+    #                                anti_aliasing=True).astype(np.float32)
+    #     recon_widefield = out
+        
     print('processed widefield video shape: (trial, frame, x, y)', recon_widefield.shape)
     
     if square:
         print('pad each frame to a square..')
-        #padding the video shape to 320,320
-        pad_height = (0, 0)
-        pad_width = (50, 50)
-        pad_frame = (0, 0)
+        # shape is (trial, frame, x, y) == (N, T, H, W)
+        H = recon_widefield.shape[2]
+        W = recon_widefield.shape[3]
+        if H > W:
+            d = H - W
+            pad_height = (0, 0)
+            pad_width  = (d // 2, d - d // 2)
+        elif W > H:
+            d = W - H
+            pad_height = (d // 2, d - d // 2)
+            pad_width  = (0, 0)
+        else:
+            pad_height = (0, 0)
+            pad_width  = (0, 0)
         pad_trial = (0, 0)
-        recon_widefield = np.pad(recon_widefield, (pad_trial, pad_frame, pad_height, pad_width), 
-                                            mode = 'constant', constant_values=0)
+        pad_frame = (0, 0)
+        recon_widefield = np.pad(recon_widefield,
+                                 (pad_trial, pad_frame, pad_height, pad_width),
+                                 mode='constant', constant_values=0)
 
 
     # replace all nan (backgground) with 0
-    recon_widefield = np.nan_to_num(recon_widefield, nan=0)
+    recon_widefield = np.nan_to_num(recon_widefield, nan=0, copy=False)
 
     #train test split
     num_trials = len(recon_widefield)
     np.random.seed(440)
     indices = np.random.permutation(num_trials)
 
-    val_size = int(val_split * num_trials)
+    if num_trials >= 2:
+        val_size = max(1, min(num_trials - 1, int(np.ceil(val_split * num_trials))))
+    else:
+        val_size = 0  # only one trial; put it all in train
+
     train_indices = indices[val_size:]
-    val_indices = indices[:val_size]
+    val_indices   = indices[:val_size]
 
     train_data = recon_widefield[train_indices]
-    val_data = recon_widefield[val_indices]
+    val_data   = recon_widefield[val_indices]
 
     splitted_data['train'] = train_data
     splitted_data['val'] = val_data
@@ -513,6 +556,7 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
             pad_frame = (0, 0)
             mean_subtracted_recon_data = np.pad(mean_subtracted_recon_data, (pad_frame, pad_height, pad_width), 
                                                 mode = 'constant', constant_values=0)
+            mean_image = np.pad(mean_image, (pad_height, pad_width),  mode = 'constant', constant_values=0)
         else:   
             print('truncate each frame..')
             #truncate the top of the video
@@ -521,6 +565,8 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
 
     # Rotate the video pixels
     mean_subtracted_recon_data = np.transpose(mean_subtracted_recon_data, (0, 2, 1))
+    mean_image = np.transpose(mean_image, (1, 0))
+    
     # split data and make loader
     train_val_split_index = int((1-val_split_ratio)*mean_subtracted_recon_data.shape[0])
     train_video = mean_subtracted_recon_data[:train_val_split_index]
@@ -533,4 +579,4 @@ def loder_musall_behavior(folderpath, start_V = 0, end_V = 89928, val_split_rati
     val_dataloader = DataLoader(val_dataset, batch_size=batch_size, num_workers=num_workers, shuffle=False)
 
     print(f'finish loading videos')
-    return train_dataloader, val_dataloader, train_video, val_video
+    return train_dataloader, val_dataloader, train_video, val_video, mean_image
