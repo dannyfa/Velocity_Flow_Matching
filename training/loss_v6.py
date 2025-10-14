@@ -188,7 +188,8 @@ class VFMToyLoss:
             self.m_dyn = self.m_dyn.to(device=device, dtype=torch.float32)
 
         # split the batch used for IS for u_net and v_net
-        B_u = (B // 2) if (self.cmp_is and self.dyn_is) else (B if self.cmp_is else 0)
+        # lazy split...
+        B_u = (B // 2)
         B_v = B - B_u
 
         taus  = torch.empty(B, device=device)
