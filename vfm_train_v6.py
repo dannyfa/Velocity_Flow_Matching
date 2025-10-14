@@ -33,8 +33,6 @@ def _to_list_of_arrays(x):
         return [x[i] for i in range(x.shape[0])]
     raise RuntimeError(f"Unsupported dataset shape: {getattr(x,'shape',None)}")
 
-def _is_vector_trials(trials):
-    return all(arr.ndim == 2 for arr in trials)        # (T, D)
 
 def _is_movie_trials(trials):
     return all(arr.ndim in (3, 4) for arr in trials)   # (T,H,W) or (T,C,H,W)
@@ -51,11 +49,6 @@ def _ensure_TCHW(trials, dtype=np.float32):
             raise RuntimeError(f"Expected image trial, got {a.shape}")
         out.append(a.astype(dtype, copy=False))
     return out
-
-def _infer_img_ch_hw(first_tchw):
-    """first_tchw: array shaped (T, C, H, W). Returns (C,H,W)."""
-    _, C, H, W = first_tchw.shape
-    return int(C), int(H), int(W)
 
 
 def _try_load_cov(path_npy, path_npz_key='samples'):
@@ -78,7 +71,6 @@ def _try_load_cov(path_npy, path_npz_key='samples'):
         return arr
     return None
 
-
 def _make_lag_cov_list(trajs, k_):
     lag_list = []
     for X in trajs:
@@ -94,29 +86,75 @@ def _make_lag_cov_list(trajs, k_):
         lag_list.append(lag)
     return lag_list
 
+def _parse_channels_csv(s: str):
+    """Parse channels from '32,64,128,256' or '32x64x128x256'. Returns list[int] or None."""
+    if not s:
+        return None
+    import re
+    toks = [t for t in re.split(r'[ ,x/]+', s) if t]
+    return [int(t) for t in toks]
 
-def _make_lag_cov_list_images(trajs, k_):
-    """For image trials shaped (T, C, H, W), return list of (T-k, C*(k+1), H, W)
-    by stacking frames [t-k, ..., t] along the channel axis."""
-    lag_list = []
-    for X in trajs:
-        X = np.asarray(X)
-        if X.ndim != 4:
-            raise click.ClickException("Image lag cov requires trials shaped (T, C, H, W).")
-        T, C, H, W = X.shape
-        if k_ == 0:
-            lag = X.copy()
-        else:
-            # gather [X_{t-k}, ..., X_t] and concat over channel dimension
-            blocks = [X[k_-j : T-j] for j in range(k_ + 1)]  # k_+1 tensors of shape (T-k, C, H, W)
-            lag = np.concatenate(blocks, axis=1)             # (T-k, C*(k+1), H, W)
-        lag_list.append(lag)
-    return lag_list
-
-def _flatten_timewise(arr):
-    """Flatten spatial/channel dims, keep time: (T, ...) -> (T, prod(...))."""
-    a = np.asarray(arr)
-    return a.reshape(a.shape[0], -1)
+# # CLI example
+# python vfm_train_v6.py \
+#   --data_path data/ball \
+#   --data_name balls \
+#   --outdir out/ball/t \
+#   --dims_to_keep 2 \
+#   --lag_k 2 \
+#   --dt 0.01 \
+#   --hist_noise_std 1e-1 \
+#   --grad_clip \
+#   --grad_clip_val 1. \
+#   --use_t_dyn \
+#   --dyn_arch ToyConvUNet \
+#   --flow_arch ToyConvUNet \
+#   --encoder_arch Latent_LargeCNN_VAE \
+#   --conv_ch_cmp 32,64,128,256 \
+#   --conv_embed_cmp 256 \
+#   --conv_ch_dyn 32,64,128,256 \
+#   --conv_embed_dyn 256 \
+#   --conv_ch_enc 32,64,128,256 \
+#   --eps 1e-6 \
+#   --d_min 1e-20 \
+#   --dip_use_dims_to_keep \
+#   --duration 1000 \
+#   --batch 256 \
+#   --batch_gpu 16 \
+#   --lr 1e-3 \
+#   --lr_floor 1e-4 \
+#   --sigma_dyn_fm 1e-1 \
+#   --sigma_comp_fm 1e-3 \
+#   --alpha 10.0 \
+#   --beta 10.0 \
+#   --gamma 10.0 \
+#   --eta 10.0 \
+#   --eta_post 10. \
+#   --alpha_mu .5 \
+#   --init_latent pca \
+#   --init_latent_steps 10000 \
+#   --init_latent_lr 1e-2 \
+#   --pre_train \
+#   --pre_train_kimgs 5000 \
+#   --pre_lr_ramp_kimg 50 \
+#   --pre_param_kimg 50 \
+#   --train_param_ramp_kimg 50 \
+#   --no_pre_flow \
+#   --pre_lie \
+#   --no_pretrain_early_on \
+#   --dip_thresh_scale 10 \
+#   --lie_thresh_scale 10 \
+#   --flow_thresh_scale 10 \
+#   --cmp_is \
+#   --dyn_is \
+#   --is_bins_tau 20 \
+#   --is_bins_t 20 \
+#   --is_ema 0.05 \
+#   --no_is_sqrt \
+#   --no_uniform_tau_v \
+#   --seed 1234 \
+#   --tick 10 \
+#   --snap 100 \
+#   --dump 100 \
 
 
 
@@ -129,55 +167,69 @@ def _flatten_timewise(arr):
 @click.option('--dt',                      help='Time interval between successive pts in sampled trajectories', metavar='FLOAT', type=float, default=1e-3, show_default=True)
 
 # Covariate options
-@click.option('--include_x0_tau',          help='Whether to include x0_tau in dynamics net inputs', is_flag=True)
-@click.option('--use_dynamic_covariates',  help='Whether to use dynamic covariates (if available)', is_flag=True)
-@click.option('--use_static_covariates',   help='Whether to use static covariates (if available)', is_flag=True)
+@click.option('--include_x0_tau/--no_include_x0_tau',          help='Whether to include x0_tau in dynamics net inputs', default=False, show_default=True)
+@click.option('--use_dynamic_covariates/--no_use_dynamic_covariates',  help='Whether to use dynamic covariates (if available)', default=False, show_default=True)
+@click.option('--use_static_covariates/--no_use_static_covariates',    help='Whether to use static covariates (if available)', default=False, show_default=True)
+
 @click.option('--dim_cov_dynamic',         help='Dimension of dynamic covariates [default: inferred from data]', metavar='INT', type=int)
 @click.option('--dim_cov_static',          help='Dimension of static covariates [default: inferred from data]', metavar='INT', type=int)
 @click.option('--lag_k',                   help='Lag order k to build lag-k covariate matrix (>=0)', metavar='INT', type=click.IntRange(min=0), default=0, show_default=True)
 @click.option('--hist_noise_std',          help='Std of Gaussian noise added to lag-history features during training (0 disables).', metavar='FLOAT', type=click.FloatRange(min=0), default=0.0, show_default=True)
-
-
-@click.option('--data_imgshape',           help='Shape for img if using toy image data (balls)', metavar='INT', type=int, default=28, show_default=True)
-@click.option('--data_radius',             help='Radius for balls to be created (if using balls dset)', metavar='INT', type=int, default=3, show_default=True)
-@click.option('--data_inch',               help='Number of channels in toy img data (if using balls dset)', metavar='INT', type=int, default=1, show_default=True)
-@click.option('--data_blur',               help='Whether or not to add small blur to created balls', is_flag=True)
-
 
 # FM options
 @click.option('--flow_matcher_type',       help='Flow matching implementation to use.', metavar='regular|exactot|sinkhorn', type=click.Choice(['regular', 'exactot', 'sinkhorn']), default='regular', show_default=True)
 @click.option('--sigma_dyn_fm',            help='Sigma val for dynamics flow matcher class', metavar='FLOAT', type=float, default=0.1, show_default=True)
 @click.option('--sigma_comp_fm',           help='Sigma val for compression flow matcher class', metavar='FLOAT', type=float, default=0.1, show_default=True)
 
-@click.option('--cmp-is/--no-cmp-is', default=True, show_default=True,
-              help='Use importance sampling over τ for compression (flow) loss.')
-@click.option('--dyn-is/--no-dyn-is', default=True, show_default=True,
-              help='Use importance sampling over (τ, t_dyn) for dynamics loss.')
+# FM IS options
+@click.option('--cmp_is/--no_cmp_is', default=True, show_default=True,
+              help='Use importance sampling over tau for compression (flow) loss.')
+@click.option('--dyn_is/--no_dyn_is', default=True, show_default=True,
+              help='Use importance sampling over (tau, t_dyn) for dynamics loss.')
 
-@click.option('--is-bins-tau', type=int, default=16, show_default=True,
-              help='Number of τ bins for importance sampling.')
-@click.option('--is-bins-t', type=int, default=16, show_default=True,
+@click.option('--is_bins_tau', type=int, default=20, show_default=True,
+              help='Number of tau bins for importance sampling.')
+@click.option('--is_bins_t', type=int, default=16, show_default=True,
               help='Number of t_dyn bins per τ-bin for importance sampling.')
-@click.option('--is-ema', type=float, default=0.05, show_default=True,
+@click.option('--is_ema', type=float, default=0.05, show_default=True,
               help='EMA step for second-moment tables used by IS (0<is_ema≤1).')
-@click.option('--is-eps', type=float, default=1e-8, show_default=True,
+@click.option('--is_eps', type=float, default=1e-5, show_default=True,
               help='Tiny numerical floor to keep proposals/weights well-defined.')
+@click.option('--is_sqrt/--no_is_sqrt', default=False, show_default=True,
+              help='Use sqrt of second-moment scores for variance reduction (--is_sqrt) or first-moment for gradient balance (--no_is_sqrt).')
+@click.option('--uniform_tau_v/--no_uniform_tau_v', default=False, show_default=True,
+              help='Force uniform tau for v_net (overrides IS for τ in v branch).')
 
-
-
+# low-D encoder
 @click.option('--eps',                     help='Variance for compressed dimensions in LS. Used to sample x0s', metavar='FLOAT', type=float, default=1.0, show_default=True)
 @click.option('--d_min',                   help='Minimum variance for any/all dimensions in LS. Used to sample x0s.', metavar='FLOAT', type=float, default=1e-15, show_default=True)
 
 # Arch Options
 @click.option('--dyn_arch',                help='Dynamics net arch to use.', metavar='ToyConvUNet|ToyMLP|Adapted_ToyConvUNet', type=click.Choice(['ToyConvUNet', 'ToyMLP', 'Adapted_ToyConvUNet']), default='ToyMLP', show_default=True)
-@click.option('--use-t-dyn/--no-use-t-dyn', help='Include normalized dynamics time t_dyn=ts/dt in v-net inputs', default=True, show_default=True)
+@click.option('--use_t_dyn/--no_use_t_dyn', help='Include normalized dynamics time t_dyn=ts/dt in v-net inputs', default=True, show_default=True)
+@click.option('--flow_detach/--no_flow_detach',
+              help='Detach encoder samples when forming FM targets (debug only).',
+              default=False, show_default=True)
 
 @click.option('--flow_arch',               help='Flow net arch to use.', metavar='ToyConvUNet|ToyMLP|Adapted_ToyConvUNet', type=click.Choice(['ToyConvUNet', 'ToyMLP', 'Adapted_ToyConvUNet']), default='ToyMLP', show_default=True)
 @click.option('--encoder_arch',            help='Network architecture to use for encoder.', metavar='Latent_MLP_VAE|Latent_CNN_VAE|Latent_LargeCNN_VAE|Adapted_Latent_LargeCNN_VAE', type=click.Choice(['Latent_MLP_VAE', 'Latent_CNN_VAE', 'Latent_LargeCNN_VAE', 'Adapted_Latent_LargeCNN_VAE']), default='Latent_MLP_VAE', show_default=True)
+
 @click.option('--encoder_depth',           help='Number of hidden layers in MLP encoder', metavar='INT', type=int, default=2, show_default=True)
 @click.option('--encoder_width',           help='Width of each hidden layer in MLP encoder', metavar='INT', type=int, default=10, show_default=True)
-@click.option('--encoder-rank', 'encoder_rank', help='Rank r for encoder U (default: None → 2*dims_to_keep)', metavar='INT', type=int, default=None, show_default=True)
+@click.option('--encoder_rank', help='Rank r for encoder U (default: None → 2*dims_to_keep)', metavar='INT', type=int, default=None, show_default=True)
 
+@click.option('--conv_ch_cmp',  metavar='CSV', type=str, default='32,64,128,256', help='Channels for compression/flow UNet, e.g. "32,64,128,256" (default: 32,64,128,256)')
+@click.option('--conv_embed_cmp', metavar='INT', type=int, default=256, help='Embedding dim for compression/flow UNet (default: 256)')
+@click.option('--conv_ch_dyn',  metavar='CSV', type=str, default='32,64,128,256', help='Channels for dynamics UNet, e.g. "32,64,128,256" (default: 32,64,128,256)')
+@click.option('--conv_embed_dyn', metavar='INT', type=int, default=256, help='Embedding dim for dynamics UNet (default: 256)')
+@click.option('--conv_ch_enc',  metavar='CSV', type=str, default='32,64,128,256', help='Channels for CNN encoder, e.g. "32,64,128,256" (default: 32,64,128,256)')
+
+@click.option('--mlp_depth_cmp',               help='Number of hidden layers in MLP, compression flow nets', metavar='INT', type=int, default=2, show_default=True)
+@click.option('--mlp_width_cmp',               help='Width of each hidden layer in MLP, compression flow nets', metavar='INT', type=int, default=64, show_default=True)
+@click.option('--mlp_depth_dyn',               help='Number of hidden layers in MLP, dynamic flow nets', metavar='INT', type=int, default=2, show_default=True)
+@click.option('--mlp_width_dyn',               help='Width of each hidden layer in MLP, dynamic flow nets', metavar='INT', type=int, default=64, show_default=True)
+
+# initialization of encoder
 @click.option('--init_latent',             help='Latent init mode', type=click.Choice(['random','pca']), default='random', show_default=True)
 @click.option('--init_latent_steps',       help='Warmup steps for PCA init', type=int, default=50000, show_default=True)
 @click.option('--init_latent_lr',          help='LR for PCA init', type=float, default=1e-3, show_default=True)
@@ -186,75 +238,113 @@ def _flatten_timewise(arr):
 @click.option('--init_latent_patience',     help='Stop after this many consecutive small-improvement steps', type=int, default=100, show_default=True)
 @click.option('--init_latent_min_steps',    help='Do at least this many warm-up steps before checking tol', type=int, default=1000, show_default=True)
 
-@click.option('--mlp_depth_cmp',               help='Number of hidden layers in MLP, compression flow nets', metavar='INT', type=int, default=2, show_default=True)
-@click.option('--mlp_width_cmp',               help='Width of each hidden layer in MLP, compression flow nets', metavar='INT', type=int, default=64, show_default=True)
-@click.option('--mlp_depth_dyn',               help='Number of hidden layers in MLP, dynamic flow nets', metavar='INT', type=int, default=2, show_default=True)
-@click.option('--mlp_width_dyn',               help='Width of each hidden layer in MLP, dynamic flow nets', metavar='INT', type=int, default=64, show_default=True)
-
-
 # Training Hyperparameters.
 @click.option('--duration',                help='Training duration', metavar='MIMG', type=click.FloatRange(min=0, min_open=True), default=7000, show_default=True)
 @click.option('--batch',                   help='Total batch size', metavar='INT', type=click.IntRange(min=1), default=8192, show_default=True)
-@click.option('--batch-gpu',               help='Limit batch size per GPU', metavar='INT', type=click.IntRange(min=1), default=1024, show_default=True)
-@click.option('--lr',                      help='Learning rate', metavar='FLOAT', type=click.FloatRange(min=0, min_open=True), default=1e-5, show_default=True)
-@click.option('--use_ema',                 help='Whether or not to apply EMA to model params', is_flag=True)
+@click.option('--batch_gpu',               help='Limit batch size per GPU', metavar='INT', type=click.IntRange(min=1), default=1024, show_default=True)
+@click.option('--lr',                      help='initial learning rate', metavar='FLOAT', type=click.FloatRange(min=0, min_open=True), default=1e-5, show_default=True)
+@click.option('--lr_floor', help='Absolute LR floor for the adaptive scheduler',
+              metavar='FLOAT', type=click.FloatRange(min=0), default=1e-4, show_default=True)
+@click.option('--lr_pre', help='initial learning rate during pre-train [default: 10x --lr]',
+              metavar='FLOAT', type=click.FloatRange(min=0, min_open=True),
+              default=None, show_default=False)
+@click.option('--lr_floor_pre', help='Absolute LR floor during pre-train [default: 10x --lr_floor]',
+              metavar='FLOAT', type=click.FloatRange(min=0),
+              default=None, show_default=False)
+
+
+@click.option('--use_ema/--no_use_ema',    help='Whether or not to apply EMA to model params', default=True, show_default=True)
 @click.option('--ema',                     help='EMA half-life (if using EMA)', metavar='MIMG', type=click.FloatRange(min=0), default=0.5, show_default=True)
 @click.option('--alpha',                   help='Scale for flow net component of loss', metavar='FLOAT', type=float, default=1.0, show_default=True)
 @click.option('--beta',                    help='Scale for dynamics net component of loss', metavar='FLOAT', type=float, default=1.0, show_default=True)
 @click.option('--gamma',                   help='Scale for Lie derivative component of loss', metavar='FLOAT', type=float, default=1.0, show_default=True)
 @click.option('--eta',                     help='Scale for encoder reconstruction component of loss', metavar='FLOAT', type=float, default=1.0, show_default=True)
-@click.option('--grad_clip',               help='Whether or not to clip model gradient norm.', is_flag=True)
-@click.option('--grad_clip_val',           help='Max value model gradients should be clipped to.', metavar='FLOAT', type=float, default=1.0, show_default=True)
-@click.option('--norm_lie',                help='Whether or not to normalize Lie derivative.', is_flag=True)
-@click.option('--pre_train',               help='Whether or not to pre-train nets.', is_flag=True)
+@click.option('--eta_post', help='training encoder loss weight', metavar='FLOAT', type=float, default=1.0, show_default=True)
+@click.option('--alpha_mu',           help='Weight of DIP loss on mu', metavar='FLOAT', type=float, default=0.1, show_default=True)
+
 @click.option('--pre_train_kimgs',         help='Number of Kimgs to pre-train nets for', metavar='INT', type=int, default=0, show_default=True)
-@click.option('--alpha_mu',           help='Weifht of KL loss on mu', metavar='FLOAT', type=float, default=0.1, show_default=True)
-@click.option('--kl-eps', type=float, default=1e-6, show_default=True,
-              help='Jitter/epsilon for KL Cholesky and variance clamps.')
-@click.option('--kl-use-dims-to-keep/--no-kl-use-dims-to-keep',
+@click.option('--grad_clip/--no_grad_clip', help='Whether or not to clip model gradient norm.', default=False, show_default=True)
+@click.option('--grad_clip_val',           help='Max value model gradients should be clipped to.', metavar='FLOAT', type=float, default=1.0, show_default=True)
+@click.option('--norm_lie/--no_norm_lie',  help='Whether or not to normalize Lie derivative.', default=False, show_default=True)
+@click.option('--pre_train/--no_pre_train', help='Whether or not to pre-train nets.', default=True, show_default=True)
+
+# pre-train/ training schedule
+@click.option('--pre_t_abs', help='Absolute recon loss target to end pre-train early '
+              '(None: infer from data)', metavar='FLOAT', type=float, default=None, show_default=True)
+@click.option('--dip_thresh_scale',        help='Scale for DIP arming threshold, threshold = scale * pre_T_abs',
+              metavar='FLOAT', type=float, default=10.0, show_default=True)
+@click.option('--lie_thresh_scale',   help='Scale for Lie arming threshold, threshold = scale * pre_T_abs',
+              metavar='FLOAT', type=float, default=10.0, show_default=True)
+@click.option('--flow_thresh_scale',   help='Scale for flow arming threshold, threshold = scale * pre_T_abs',
+              metavar='FLOAT', type=float, default=10.0, show_default=True)
+@click.option('--pre_flow/--no_pre_flow', default=False, show_default=True,
+              help='During pre-train, enable compression/flow term.')
+@click.option('--pre_lie/--no_pre_lie', default=True, show_default=True,
+              help='If True, Lie is ON during pre-train; otherwise OFF until training.')
+@click.option('--pretrain_early_on/--no_pretrain_early_on', default=False, show_default=True,
+              help='If set, any pre-train-active penalties (DIP, Lie if allowed, Flow if allowed) start immediately in pre-train; otherwise they arm at 10×pre_T_abs and/or time-limit.')
+@click.option('--pre_lr_ramp_kimg', metavar='KIMG',
+              type=click.FloatRange(min=0), default=0, show_default=True,
+              help='Learning-rate warmup length during pre-train.')
+@click.option('--pre_param_kimg', metavar='KIMG',
+              type=click.FloatRange(min=0), default=0, show_default=True,
+              help='Pre-train ramp length (kimg) for penalties active in pre-train.')
+@click.option('--train_param_ramp_kimg', metavar='KIMG',
+              type=click.FloatRange(min=0), default=0, show_default=True,
+              help='Training ramp length (kimg) for penalties in training.')
+
+# dip loss settings
+@click.option('--dip_eps', 'dip_eps', type=float, default=1e-6, show_default=True,
+              help='Jitter/epsilon for DIP Cholesky and variance clamps.')
+@click.option('--dip_use_dims_to_keep/--no_dip_use_dims_to_keep', 'dip_use_dims_to_keep',
               default=False, show_default=True,
-              help='If set, KL uses first dims_to_keep as full-cov head; else full-cov over all d.')
-@click.option('--kl-warmup-kimg', metavar='KIMG', type=click.FloatRange(min=0), default=1000, show_default=True,
-              help='Warmup period (in kimg) before KL ramp starts.')
-@click.option('--kl-ramp-kimg', metavar='KIMG', type=click.FloatRange(min=0), default=5000, show_default=True,
-              help='Ramp duration (in kimg) for KL weight.')
+              help='If set, DIP uses first dims_to_keep as full-cov head; else full-cov over all d.')
 
 # Performance-related.
 @click.option('--ls',                      help='Loss scaling', metavar='FLOAT', type=click.FloatRange(min=0, min_open=True), default=1, show_default=True)
-@click.option('--bench',                   help='Enable cuDNN benchmarking', metavar='BOOL', type=bool, default=True, show_default=True)
-@click.option('--cache',                   help='Cache dataset in CPU memory', metavar='BOOL', type=bool, default=True, show_default=True)
+@click.option('--bench/--no_bench',        help='Enable cuDNN benchmarking', default=True, show_default=True)
 @click.option('--workers',                 help='DataLoader worker processes', metavar='INT', type=click.IntRange(min=1), default=1, show_default=True)
 
 # I/O-related.
 @click.option('--outdir',                  help='Where to save the results', metavar='DIR', type=str, required=True)
 @click.option('--desc',                    help='String to include in result dir name', metavar='STR', type=str)
-@click.option('--nosubdir',                help='Do not create a subdirectory for results', is_flag=True)
+@click.option('--nosubdir/--no_nosubdir',  help='Do not create a subdirectory for results', default=False, show_default=True)
 @click.option('--tick',                    help='How often to print progress', metavar='KIMG', type=click.IntRange(min=1), default=50, show_default=True)
 @click.option('--snap',                    help='How often to save snapshots', metavar='TICKS', type=click.IntRange(min=1), default=250, show_default=True)
 @click.option('--dump',                    help='How often to dump state', metavar='TICKS', type=click.IntRange(min=1), default=250, show_default=True)
 @click.option('--seed',                    help='Random seed  [default: random]', metavar='INT', type=int)
 @click.option('--resume',                  help='Resume from previous training state', metavar='PT', type=str)
-@click.option('-n', '--dry-run',           help='Print training options and exit', is_flag=True)
-@click.option('--eta_post', help='Post-ramp target for eta (encoder loss weight)', metavar='FLOAT', type=float, default=1.0, show_default=True)
-@click.option('--eta_hold_kimg', help='Hold period for eta (in kimg) before ramp starts', metavar='KIMG', type=click.FloatRange(min=0), default=1000, show_default=True)
-@click.option('--eta_ramp_kimg', help='Ramp duration for eta (in kimg) from eta -> eta_post', metavar='KIMG', type=click.FloatRange(min=0), default=5000, show_default=True)
-
+@click.option('-n', '--dry_run/--no_dry_run', help='Print training options and exit', default=False, show_default=True)
 
 
 def main(**kwargs):
     
     """
-    Sets up main args needed for toy_training_loop_vfm_noDataGen.py
+    Set up and launch training for toy_training_loop_vfm_v6.
     """
     
     opts = dnnlib.EasyDict(kwargs)
     torch.multiprocessing.set_start_method('spawn')
     dist.init()
-    
+
+    # (1) Setup & init
     # Setup device
-    device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
-    device = torch.device(device_name)
+    # # local version
+    # device_name = 'cuda' if torch.cuda.is_available() else 'cpu'
+    # device = torch.device(device_name)
     
+    # DCC version
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+    dist.print0(f"[init] rank={dist.get_rank()} local_rank={local_rank} device={device}")
+    
+    
+
+    # (2) Load data
     # Load main data
     dataset_samples = np.load(os.path.join(opts.data_path, 'dataset_samples.npz'), allow_pickle=True)
     dset_samples_raw = dataset_samples['samples']
@@ -265,7 +355,6 @@ def main(**kwargs):
     
     dset_samples_orig = [np.asarray(a) for a in dset_samples]
 
-    
     # Load covariate data if available
     cov_dynamic_samples = None
     cov_static_samples = None
@@ -281,7 +370,7 @@ def main(**kwargs):
         cov_static_samples = _try_load_cov(cov_static_path)
 
 
-    # Build lag-k covs, truncate, and concatenate
+    # (3) Build lag-k covs, truncate, and concatenate
     k = int(max(0, opts.lag_k))
     min_T = min(np.asarray(tr).shape[0] for tr in dset_samples)
     if k >= min_T:
@@ -294,7 +383,7 @@ def main(**kwargs):
         opts.data_imgshape = _H  # assumes square
 
     
-    # 1) construct lag-k cov matrix from original samples
+    # 3a) construct lag-k cov matrix from original samples
     if is_image:
         # dset_samples: list of (T, C, H, W) — build (T-k, C*(k+1), H, W)
         lag_cov_list = None
@@ -303,10 +392,10 @@ def main(**kwargs):
         lag_cov_list = _make_lag_cov_list(dset_samples, k)
 
     
-    # 2) truncate dset_samples
+    # 3b) truncate dset_samples
     dset_samples_trunc = [np.asarray(X)[k:] for X in dset_samples]
     
-    # 3) truncate cov_dynamic
+    # 3c) truncate cov_dynamic
     cov_dynamic_trunc = None
     if cov_dynamic_samples is not None:
         if isinstance(cov_dynamic_samples, list):
@@ -335,7 +424,7 @@ def main(**kwargs):
         else:
             raise click.ClickException("Unsupported cov_dynamic type; expected list or ndarray.")
 
-    # 4) truncate cov_static if it is a list (time-indexed); if ndarray (per-traj), broadcast
+    # 3d) truncate cov_static if it is a list (time-indexed); if ndarray (per-traj), broadcast
     if cov_static_samples is None:
         # Case 1: lag + static=None
         cov_static_new = None
@@ -401,32 +490,30 @@ def main(**kwargs):
         del lag_cov_list
         gc.collect()
         
+    if dist.get_rank() == 0:
+        data_outdir = os.path.join(opts.outdir, 'data')
+        os.makedirs(data_outdir, exist_ok=True)
+        np.savez(os.path.join(data_outdir, 'dataset_samples.npz'),
+                 samples=np.array(dset_samples_trunc, dtype=object))
+        if cov_dynamic_trunc is not None:
+            np.savez(os.path.join(data_outdir, 'cov_dynamic_samples.npz'),
+                     samples=np.array(cov_dynamic_trunc, dtype=object))
+        if is_image:
+            # Save only compact static (no lag) to avoid huge files / RAM spikes
+            np.savez(os.path.join(data_outdir, 'cov_static_trunc_only.npz'),
+                     samples=np.array(cov_static_trunc_only, dtype=object))
+        else:
+            np.savez(os.path.join(data_outdir, 'lag_cov_list.npz'),
+                     samples=np.array(lag_cov_list, dtype=object))
+            np.savez(os.path.join(data_outdir, 'cov_static_new.npz'),
+                     samples=np.array(cov_static_new, dtype=object))
+        dist.print0(f"Saved processed data to: {data_outdir}")
     
-    data_outdir = os.path.join(opts.outdir, 'data')
-    os.makedirs(data_outdir, exist_ok=True)
-    np.savez(os.path.join(data_outdir, 'dataset_samples.npz'), samples=np.array(dset_samples_trunc, dtype=object))
-    if cov_dynamic_trunc is not None:
-        np.savez(os.path.join(data_outdir, 'cov_dynamic_samples.npz'), samples=np.array(cov_dynamic_trunc, dtype=object))
-
-
-    if is_image:
-        # For image data: save ONLY compact static (no lag) for downstream analysis, to avoid huge files / RAM spikes
-        np.savez(os.path.join(data_outdir, 'cov_static_trunc_only.npz'),
-                 samples=np.array(cov_static_trunc_only, dtype=object))
-    else:
-        # For non-image data: usually save is not very painful
-        np.savez(os.path.join(data_outdir, 'lag_cov_list.npz'),
-                 samples=np.array(lag_cov_list, dtype=object))
-        np.savez(os.path.join(data_outdir, 'cov_static_new.npz'),
-                 samples=np.array(cov_static_new, dtype=object))
-    
-    dist.print0(f"Saved processed data to: {data_outdir}")
-        
     dset_samples = dset_samples_trunc
     cov_dynamic_samples = cov_dynamic_trunc
     cov_static_samples = cov_static_new
     
-    # Infer data_dim from loaded data
+    # (4) Infer data_dim from loaded data
     if is_image:
         # dset_samples_trunc element is (T, C, H, W)
         _, C, H, W = np.asarray(dset_samples_trunc[0]).shape
@@ -434,11 +521,10 @@ def main(**kwargs):
     else:
         # vectors: (T, D)
         opts.data_dim = int(np.asarray(dset_samples_trunc[0]).shape[1])
-    working_data_dim = opts.data_dim
 
     if opts.dim_cov_dynamic is None:
-        opts.dim_cov_dynamic = (cov_dynamic_samples[0].shape[1]
-                                if cov_dynamic_samples is not None else 0)
+        src_dyn = cov_dynamic_trunc
+        opts.dim_cov_dynamic = (src_dyn[0].shape[1] if (isinstance(src_dyn, list) and len(src_dyn) > 0) else 0)
 
 
     if opts.dim_cov_static is None:
@@ -459,19 +545,20 @@ def main(**kwargs):
     else:
         cov_static_samples_for_dataset = cov_static_samples
 
-
+    
     # Infer n_trajs
     inferred_n_trajs = len(dset_samples)
-    
+
+    # (5) Build config dict. (c)
     # Initialize config dict.
     c = dnnlib.EasyDict()
-    
+
+    # (5a) Dataset & dataloader kwargs
     # Setup dataset kwargs
-    balls_dset_specs = dnnlib.EasyDict(img_shape=[opts.data_imgshape, opts.data_imgshape], radius=opts.data_radius, blur=opts.data_blur) if opts.data_name.lower()=='balls' else None
-    c.dataset_kwargs = dnnlib.EasyDict(dset_name=opts.data_name, dt=opts.dt, balls_dset_specs=balls_dset_specs)
+    c.dataset_kwargs = dnnlib.EasyDict(dset_name=opts.data_name, dt=opts.dt, balls_dset_specs=None)
     c.dataset_kwargs.n_trajs = inferred_n_trajs
 
-    # Create dataset object with covariate support
+    # (5b) Create dataset object with covariate support
     dataset_obj = dnnlib.util_v6.ToyDsetDynamics(
         data=dset_samples_trunc, dt=opts.dt, nForward=1,
         cov_dynamic_data=cov_dynamic_trunc,
@@ -493,10 +580,19 @@ def main(**kwargs):
         prefetch_factor=2
     )
     
-    # Setup optimizer kwargs
+    # (5c) Setup optimizer kwargs
     c.optimizer_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=opts.lr, betas=[0.9,0.999], eps=1e-8)
+    c.optimizer_kwargs.lr_floor_abs = opts.lr_floor
+    if opts.lr_pre is None: opts.lr_pre = 10.0 * opts.lr
+    if opts.lr_floor_pre is None: opts.lr_floor_pre = 10.0 * opts.lr_floor
+    c.lr_pre = float(opts.lr_pre)
+    c.lr_floor_pre_abs = float(opts.lr_floor_pre)
     
-    # Setup loss kwargs
+    c.pre_T_abs = opts.pre_t_abs
+    c.update(dip_thresh_scale=opts.dip_thresh_scale, lie_thresh_scale=opts.lie_thresh_scale, flow_thresh_scale=opts.flow_thresh_scale)
+    
+    
+    # (5d) Setup loss kwargs
     c.loss_kwargs = dnnlib.EasyDict(flow_matcher_type=opts.flow_matcher_type, 
                                     sigma_dynamics=opts.sigma_dyn_fm, 
                                     sigma_compression=opts.sigma_comp_fm, 
@@ -507,17 +603,18 @@ def main(**kwargs):
                                     is_bins_t=opts.is_bins_t,
                                     is_ema=opts.is_ema,
                                     is_eps=opts.is_eps,
+                                    is_sqrt=opts.is_sqrt,
+                                    uniform_tau_v=opts.uniform_tau_v,
+                                    pre_no_flow=(not opts.pre_flow),
                                     class_name='training.loss_v6.VFMToyLoss')
     
-    # Setup network kwargs
+    # (5e) Setup network kwargs
     c.network_kwargs = dnnlib.EasyDict(
         dyn_model_type=opts.dyn_arch, 
         use_t_dyn=opts.use_t_dyn,
         flow_model_type=opts.flow_arch, 
         encoder_type=opts.encoder_arch, 
-        channels=[32, 64, 128, 256], 
-        conv_embed_dim=256, 
-        data_dim=working_data_dim, 
+        data_dim=opts.data_dim, 
         dims_to_keep=opts.dims_to_keep, 
         depth_mlp_cmp=opts.mlp_depth_cmp, 
         width_mlp_cmp=opts.mlp_width_cmp, 
@@ -533,15 +630,35 @@ def main(**kwargs):
         dim_cov_dynamic=opts.dim_cov_dynamic,
         dim_cov_static=opts.dim_cov_static,
         encoder_rank=opts.encoder_rank,
+        flow_detach=opts.flow_detach,
         class_name='training.networks_v6.VFMToyNet'
     )
+
+    ch_cmp = _parse_channels_csv(getattr(opts, 'conv_ch_cmp', None))
+    ch_dyn = _parse_channels_csv(getattr(opts, 'conv_ch_dyn', None))
+    ch_enc = _parse_channels_csv(getattr(opts, 'conv_ch_enc', None))
+    if ch_cmp is not None: c.network_kwargs.channels_cmp = ch_cmp
+    if ch_dyn is not None: c.network_kwargs.channels_dyn = ch_dyn
+    if ch_enc is not None: c.network_kwargs.channels_enc = ch_enc
+        
+    if getattr(opts, 'conv_embed_cmp', None) is not None:
+        c.network_kwargs.conv_embed_dim_cmp = int(opts.conv_embed_cmp)
+    if getattr(opts, 'conv_embed_dyn', None) is not None:
+        c.network_kwargs.conv_embed_dim_dyn = int(opts.conv_embed_dyn)
     
-    # Training options.
+    # (5f) Pre-train/ training options.
+    # ramp knobs
+    c.pre_param_kimg        = opts.pre_param_kimg
+    c.pre_lr_ramp_kimg      = opts.pre_lr_ramp_kimg
+    c.train_param_ramp_kimg = opts.train_param_ramp_kimg
+    # Pre/Lie knobs
+    c.pre_no_lie            = (not opts.pre_lie)
+    c.pretrain_early_on     = opts.pretrain_early_on
+
     c.total_kimg = max(int(opts.duration * 1000), 1)
     hist_lag_dim = 0
     hist_static_dim = 0
     if (getattr(opts, 'lag_k', 0) or 0) >= 0 and (getattr(opts, 'dim_cov_static', 0) or 0) > 0:
-        k = int(opts.lag_k)
         if _is_movie_trials(dset_samples_trunc):
             _T, _C, _H, _W = np.asarray(dset_samples_trunc[0]).shape
             base = _C * _H * _W
@@ -560,21 +677,22 @@ def main(**kwargs):
     c.hist_noise_std = float(getattr(opts, 'hist_noise_std', 0.0) or 0.0)
     c.hist_lag_dim = int(hist_lag_dim)
     c.hist_static_dim = int(hist_static_dim)
-    
+
+    # (5g) ENA & logging
     c.use_ema = opts.use_ema
     c.ema_halflife_kimg = int(opts.ema * 1000) # only used if use_ema==True 
     c.update(batch_size=opts.batch, batch_gpu=opts.batch_gpu)
     c.update(loss_scaling=opts.ls, cudnn_benchmark=opts.bench)
     c.update(kimg_per_tick=opts.tick, snapshot_ticks=opts.snap, state_dump_ticks=opts.dump)
+
     c.update(alpha=opts.alpha, beta=opts.beta, gamma=opts.gamma, eta=opts.eta)
     c.update(eta_post=opts.eta_post)
-    c.update(hold_kimg=opts.eta_hold_kimg, ramp_kimg=opts.eta_ramp_kimg)
-    c.update(grad_clip=opts.grad_clip, grad_clip_val=opts.grad_clip_val, alpha_mu=opts.alpha_mu, 
-             kl_eps=opts.kl_eps, kl_use_dims_to_keep=opts.kl_use_dims_to_keep,
-             kl_warmup_kimg=opts.kl_warmup_kimg, kl_ramp_kimg=opts.kl_ramp_kimg)
+    c.update(grad_clip=opts.grad_clip, grad_clip_val=opts.grad_clip_val, alpha_mu=opts.alpha_mu,
+             dip_eps=opts.dip_eps, dip_use_dims_to_keep=opts.dip_use_dims_to_keep)
+    
     c.update(pre_train=opts.pre_train, pre_train_kimgs=opts.pre_train_kimgs)
 
-    # PCA init knobs → training_loop
+    # (5h) PCA init
     c.init_latent             = opts.init_latent
     c.init_latent_steps       = opts.init_latent_steps
     c.init_latent_lr          = opts.init_latent_lr
@@ -583,15 +701,22 @@ def main(**kwargs):
     c.init_latent_patience     = opts.init_latent_patience
     c.init_latent_min_steps    = opts.init_latent_min_steps
     
-    # Random seed.
+    # (5i) Random seed.
     if opts.seed is not None:
         c.seed = opts.seed
     else:
-        seed = torch.randint(1 << 31, size=[], device=device)
-        torch.distributed.broadcast(seed, src=0)
-        c.seed = int(seed)
+    
+        # # local version
+        # seed = torch.randint(1 << 31, size=[], device=device)
+        # torch.distributed.broadcast(seed, src=0)
+        # c.seed = int(seed)
+        
+        # DCC version
+        seed_t = torch.randint(1 << 31, (1,), device="cpu")
+        torch.distributed.broadcast(seed_t, src=0)
+        c.seed = int(seed_t.item())
 
-    # Resume learning
+    # (5j) Resume learning
     if opts.resume is not None:
         match = re.fullmatch(r'training-state-(\d+).pt', os.path.basename(opts.resume))
         if not match or not os.path.isfile(opts.resume):
@@ -600,14 +725,14 @@ def main(**kwargs):
         c.resume_kimg = int(match.group(1))
         c.resume_state_dump = opts.resume
 
-    # Description string.
-    schedule_type_str = 'prp' if working_data_dim == opts.dims_to_keep else 'prr' 
+    # (6) Description string.
+    schedule_type_str = 'prp' if opts.data_dim == opts.dims_to_keep else 'prr' 
     desc = f'{opts.data_name}-{schedule_type_str}-uncond-{opts.flow_matcher_type}FM-gpus{dist.get_world_size():d}-batch{c.batch_size:d}-fp32'
 
     if opts.desc is not None:
         desc += f'-{opts.desc}'
 
-    # Pick output directory.
+    # (7) Pick output directory.
     if dist.get_rank() != 0:
         c.run_dir = None
     elif opts.nosubdir:
@@ -626,7 +751,7 @@ def main(**kwargs):
     serial_c = {k: v for k, v in c.items() if k not in ['dataset_obj', 'dset_samples', 
                                                         'cov_dynamic_samples', 'cov_static_samples']}
 
-    # Print options.
+    # (8) Print options.
     dist.print0()
     dist.print0('Training options:')
     dist.print0(json.dumps(serial_c, indent=2))
@@ -648,7 +773,7 @@ def main(**kwargs):
         dist.print0('Dry run; exiting.')
         return
 
-    # Create output directory.
+    # (9) Create output directory.
     dist.print0('Creating output directory...')
     if dist.get_rank() == 0:
         os.makedirs(c.run_dir, exist_ok=True)
@@ -658,7 +783,7 @@ def main(**kwargs):
         dnnlib.util_v6.Logger(file_name=os.path.join(c.run_dir, 'log.txt'), file_mode='a', should_flush=True)
 
 
-    # Train.
+    # (10) Train.
     toy_training_loop_vfm_v6.training_loop(**c)
 
 #----------------------------------------------------------------------------

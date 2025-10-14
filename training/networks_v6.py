@@ -52,6 +52,15 @@ def _center_crop_or_resize(x, target_hw: int):
         return x[:, :, top:top+target_hw, left:left+target_hw]
     return F.interpolate(x, size=(target_hw, target_hw), mode='bilinear', align_corners=False)
 
+def _prefer_gn_groups(C, prefer):
+    if C % prefer == 0:
+        return prefer
+    for g in (32, 16, 8, 4, 2, 1):
+        if C % g == 0:
+            return g
+    return 1
+
+
 #----------------------------------------------------------------------------
 # Unified routine for initializing weights and biases.
 
@@ -196,27 +205,27 @@ class ToyConvUNet(torch.nn.Module):
         # Encoding layers where the resolution decreases
         self.conv1 = torch.nn.Conv2d(img_ch, channels[0], 3, stride=1, bias=False)
         self.dense1 = Dense(embed_dim, 2*channels[0])
-        self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0],  affine=False)
+        self.gnorm1 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 4), num_channels=channels[0],  affine=False)
         self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
         self.dense2 = Dense(embed_dim, 2*channels[1])
-        self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1],  affine=False)
+        self.gnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1],  affine=False)
         self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
         self.dense3 = Dense(embed_dim, 2*channels[2])
-        self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2],  affine=False)
+        self.gnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[2], 32), num_channels=channels[2],  affine=False)
         self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
         self.dense4 = Dense(embed_dim, 2*channels[3])
-        self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3],  affine=False)    
+        self.gnorm4 = torch.nn.GroupNorm(_prefer_gn_groups(channels[3], 32), num_channels=channels[3],  affine=False)    
         
         # Decoding layers where the resolution increases
         self.tconv4 = torch.nn.ConvTranspose2d(channels[3], channels[2], 3, stride=2, bias=False)
         self.dense5 = Dense(embed_dim, 2*channels[2])
-        self.tgnorm4 = torch.nn.GroupNorm(32, num_channels=channels[2],  affine=False)
+        self.tgnorm4 = torch.nn.GroupNorm(_prefer_gn_groups(channels[2], 32), num_channels=channels[2],  affine=False)
         self.tconv3 = torch.nn.ConvTranspose2d(channels[2] + channels[2], channels[1], 3, stride=2, bias=False, output_padding=1)    
         self.dense6 = Dense(embed_dim, 2*channels[1])
-        self.tgnorm3 = torch.nn.GroupNorm(32, num_channels=channels[1],  affine=False)
+        self.tgnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1],  affine=False)
         self.tconv2 = torch.nn.ConvTranspose2d(channels[1] + channels[1], channels[0], 3, stride=2, bias=False, output_padding=1)    
         self.dense7 = Dense(embed_dim, 2*channels[0])
-        self.tgnorm2 = torch.nn.GroupNorm(32, num_channels=channels[0],  affine=False)
+        self.tgnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 32), num_channels=channels[0],  affine=False)
         self.tconv1 = torch.nn.ConvTranspose2d(channels[0] + channels[0], img_ch, 3, stride=1)
         
         # The swish activation function
@@ -315,21 +324,21 @@ class Adapted_ToyConvUNet(torch.nn.Module):
         # Encoding layers where the resolution decreases
         self.conv1 = torch.nn.Conv2d(img_ch, channels[0], 3, stride=1, bias=False)
         self.dense1 = Dense(embed_dim, 2*channels[0])
-        self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+        self.gnorm1 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 4), num_channels=channels[0])
         self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=1, bias=False)
         self.dense2 = Dense(embed_dim, 2*channels[1])
-        self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+        self.gnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1])
         self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=1, bias=False)
         self.dense3 = Dense(embed_dim, 2*channels[2])
-        self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+        self.gnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[2], 32), num_channels=channels[2])
         
         # Decoding layers where the resolution increases
         self.tconv3 = torch.nn.ConvTranspose2d(channels[2], channels[1], 3, stride=1, bias=False)    
         self.dense4 = Dense(embed_dim, 2*channels[1])
-        self.tgnorm3 = torch.nn.GroupNorm(32, num_channels=channels[1])
+        self.tgnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1])
         self.tconv2 = torch.nn.ConvTranspose2d(channels[1] + channels[1], channels[0], 3, stride=1, bias=False)    
         self.dense5 = Dense(embed_dim, 2*channels[0])
-        self.tgnorm2 = torch.nn.GroupNorm(32, num_channels=channels[0])
+        self.tgnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 32), num_channels=channels[0])
         self.tconv1 = torch.nn.ConvTranspose2d(channels[0] + channels[0], img_ch, 3, stride=1)
 
     @staticmethod
@@ -762,13 +771,16 @@ class Latent_LargeCNN_VAE(torch.nn.Module):
         
         # Conv layers with decreasing res 
         self.conv1 = torch.nn.Conv2d(img_ch, channels[0], 3, stride=1, bias=False)
-        self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+        self.gnorm1 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 4), num_channels=channels[0])
+        
         self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=2, bias=False)
-        self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+        self.gnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1])
+        
         self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=2, bias=False)
-        self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+        self.gnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[2], 32), num_channels=channels[2])
+        
         self.conv4 = torch.nn.Conv2d(channels[2], channels[3], 3, stride=2, bias=False)
-        self.gnorm4 = torch.nn.GroupNorm(32, num_channels=channels[3])    
+        self.gnorm4 = torch.nn.GroupNorm(_prefer_gn_groups(channels[3], 32), num_channels=channels[3])    
         
         #Linear Layers to extract mus
         with torch.no_grad():
@@ -906,11 +918,11 @@ class Adapted_Latent_LargeCNN_VAE(torch.nn.Module):
           
         # Encoding layers where the resolution decreases
         self.conv1 = torch.nn.Conv2d(img_ch, channels[0], 3, stride=1, bias=False)
-        self.gnorm1 = torch.nn.GroupNorm(4, num_channels=channels[0])
+        self.gnorm1 = torch.nn.GroupNorm(_prefer_gn_groups(channels[0], 4), num_channels=channels[0])
         self.conv2 = torch.nn.Conv2d(channels[0], channels[1], 3, stride=1, bias=False)
-        self.gnorm2 = torch.nn.GroupNorm(32, num_channels=channels[1])
+        self.gnorm2 = torch.nn.GroupNorm(_prefer_gn_groups(channels[1], 32), num_channels=channels[1])
         self.conv3 = torch.nn.Conv2d(channels[1], channels[2], 3, stride=1, bias=False)
-        self.gnorm3 = torch.nn.GroupNorm(32, num_channels=channels[2])
+        self.gnorm3 = torch.nn.GroupNorm(_prefer_gn_groups(channels[2], 32), num_channels=channels[2])
           
         #general linear layer before extracting mu, d, u
         self.gap = torch.nn.AdaptiveAvgPool2d((2, 2))
@@ -1758,6 +1770,11 @@ class VFMToyNet(torch.nn.Module):
     def __init__(self, 
                  channels = [32, 64, 128, 256],
                  conv_embed_dim = 256,
+                 channels_cmp=None,            # list[int] for compression/flow UNet
+                 channels_dyn=None,            # list[int] for dynamics UNet
+                 channels_enc=None,            # list[int] for encoder CNN
+                 conv_embed_dim_cmp=None,      # int for compression/flow UNet
+                 conv_embed_dim_dyn=None,
                  data_dim=2,
                  dims_to_keep = 2,
                  dyn_model_type = "ToyMLP",
@@ -1779,6 +1796,7 @@ class VFMToyNet(torch.nn.Module):
                  dim_cov_static=0, # dimension for static covariates
                  use_t_dyn=True,
                  encoder_rank=None,
+                 flow_detach=False,
                  ):
         super().__init__()
         self.img_size = img_size
@@ -1790,10 +1808,17 @@ class VFMToyNet(torch.nn.Module):
         self.dim_cov_dynamic = dim_cov_dynamic
         self.dim_cov_static = dim_cov_static
         self.use_t_dyn = bool(use_t_dyn)
+        self.flow_detach = bool(flow_detach)
+        
+        ch_cmp = channels if channels_cmp is None else channels_cmp
+        ch_dyn = channels if channels_dyn is None else channels_dyn
+        ch_enc = channels if channels_enc is None else channels_enc
+        emb_cmp = conv_embed_dim if conv_embed_dim_cmp is None else conv_embed_dim_cmp
+        emb_dyn = conv_embed_dim if conv_embed_dim_dyn is None else conv_embed_dim_dyn
         
         # Create u net (flow net) - input dimension stays the same
         if flow_model_type in ["ToyConvUNet", "Adapted_ToyConvUNet"]:
-            self.unet_model = globals()[flow_model_type](channels=channels, embed_dim=conv_embed_dim, 
+            self.unet_model = globals()[flow_model_type](channels=ch_cmp, embed_dim=emb_cmp, 
                                                          img_size=img_size, img_ch=in_ch,
                                                          input_size=data_dim)
         else:
@@ -1816,7 +1841,7 @@ class VFMToyNet(torch.nn.Module):
             static_elems = int(dim_cov_static or 0) % pixels
             cov_dim_for_vnet = (dim_cov_dynamic or 0) + static_elems + (1 if self.use_t_dyn else 0)
             base_vnet = globals()[dyn_model_type](
-                channels=channels, embed_dim=conv_embed_dim,
+                channels=ch_dyn, embed_dim=emb_dyn,
                 img_size=img_size, img_ch=in_ch,
                 input_size=data_dim,
                 cov_dim=cov_dim_for_vnet
@@ -1841,7 +1866,7 @@ class VFMToyNet(torch.nn.Module):
         
         # Create encoder net
         if encoder_type in ['Latent_LargeCNN_VAE', "Adapted_Latent_LargeCNN_VAE"]:
-            self.encoder = globals()[encoder_type](channels=channels, img_size=img_size, 
+            self.encoder = globals()[encoder_type](channels=ch_enc, img_size=img_size, 
                                                    img_ch=in_ch, dims_to_keep=dims_to_keep, 
                                                    eps=cd_eps, d_min=d_min, input_size=data_dim, rank=encoder_rank) 
         elif encoder_type == "Latent_MLP_VAE": 
@@ -1854,25 +1879,24 @@ class VFMToyNet(torch.nn.Module):
                                                    d_min=d_min, rank=encoder_rank)
     
     def forward(self, x0_1, xdt_1, taus, ts, dt, tau_flowmatcher, t_flowmatcher, 
-                cov_dynamic_0=None, cov_dynamic_dt=None, cov_static=None):
+                cov_dynamic_0=None, cov_dynamic_dt=None, cov_static=None, split_bu=None):
+
         # Get proposals from encoder 
         x0_0 = self.encoder.rsample(x0_1)
         xdt_0 = self.encoder.rsample(xdt_1) 
 
-        # seems detached version is better --------------------------------------------------------------------------
-        # detached version (new)
-        x0_0_tgt  = x0_0.detach()
-        xdt_0_tgt = xdt_0.detach()
-        
-        _, x0_tau,  u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0_tgt,  x0_1,  t=taus)
-        _, xdt_tau, _      = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0_tgt, xdt_1, t=taus)
-        _, xt_tau,  ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt).clamp(0, 1))
-
-        # # non detached version (old)
-        # _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
-        # _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
-        # _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt).clamp(0, 1))
-        # ---------------------------------------------------------------------------------------------------------------
+        if self.flow_detach:
+            # detached version (for test only)
+            x0_0_tgt  = x0_0.detach()
+            xdt_0_tgt = xdt_0.detach()
+            
+            _, x0_tau,  u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0_tgt,  x0_1,  t=taus)
+            _, xdt_tau, _      = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0_tgt, xdt_1, t=taus)
+            _, xt_tau,  ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt).clamp(0, 1))
+        else:
+            _, x0_tau, u0_tau = tau_flowmatcher.sample_location_and_conditional_flow(x0_0, x0_1, t=taus)
+            _, xdt_tau, _ = tau_flowmatcher.sample_location_and_conditional_flow(xdt_0, xdt_1, t=taus)
+            _, xt_tau, ut_tau = t_flowmatcher.sample_location_and_conditional_flow(x0_tau, xdt_tau, t=(ts/dt).clamp(0, 1))
         
         # Interpolate covariates if provided
         cov_dynamic_tau = None
@@ -1881,35 +1905,72 @@ class VFMToyNet(torch.nn.Module):
             cov_dynamic_tau = (1 - t_interp) * cov_dynamic_0 + t_interp * cov_dynamic_dt
         
         cov_static_tau = cov_static
-        
-        # Get u (flow net)
-        u = self.unet_model(x0_tau, taus)
-        if u.dim() == 4:
-            u = _center_crop_or_resize(u, self.img_size).view(u.size(0), -1)
-        
-        # Get v (dynamics net) with covariates
-        if hasattr(self.vnet_model, '__class__') and self.vnet_model.__class__.__name__ == 'ConvVNetWrapper':
-            if getattr(self, 'use_t_dyn', True):
-                v = self.vnet_model(xt_tau, x0_tau, cov_dynamic_tau, cov_static_tau, taus, (ts/dt).clamp(0, 1))
-            else:
-                v = self.vnet_model(xt_tau, x0_tau, cov_dynamic_tau, cov_static_tau, taus)
-        else:
-            inputs = [xt_tau]
-            if self.include_x0_tau:
-                inputs.append(x0_tau)
-            if self.dim_cov_dynamic > 0 and cov_dynamic_tau is not None:
-                inputs.append(cov_dynamic_tau)
-            if self.dim_cov_static > 0 and cov_static_tau is not None:
-                inputs.append(cov_static_tau)
-            v_input = torch.cat(inputs, dim=-1)
 
-            if getattr(self, 'use_t_dyn', True):
-                v = self.vnet_model(v_input, taus, (ts/dt).clamp(0, 1))
+        B = x0_tau.size(0)
+        
+        if split_bu is None:
+            u = self.unet_model(x0_tau, taus)
+            if u.dim() == 4:
+                u = _center_crop_or_resize(u, self.img_size).view(u.size(0), -1)
+        else:
+            u = u0_tau.clone()  # identical target, zero loss on [split_bu:]
+            if split_bu > 0:
+                u_part = self.unet_model(x0_tau[:split_bu], taus[:split_bu])
+                if u_part.dim() == 4:
+                    u_part = _center_crop_or_resize(u_part, self.img_size).view(u_part.size(0), -1)
+                u[:split_bu] = u_part
+
+
+        if split_bu is None:
+            if hasattr(self.vnet_model, '__class__') and self.vnet_model.__class__.__name__ == 'ConvVNetWrapper':
+                if getattr(self, 'use_t_dyn', True):
+                    v = self.vnet_model(xt_tau, x0_tau, cov_dynamic_tau, cov_static_tau, taus, (ts/dt).clamp(0, 1))
+                else:
+                    v = self.vnet_model(xt_tau, x0_tau, cov_dynamic_tau, cov_static_tau, taus)
             else:
-                v = self.vnet_model(v_input, taus)
-            
+                inputs = [xt_tau]
+                if self.include_x0_tau: inputs.append(x0_tau)
+                if self.dim_cov_dynamic > 0 and cov_dynamic_tau is not None: inputs.append(cov_dynamic_tau)
+                if self.dim_cov_static  > 0 and cov_static_tau  is not None: inputs.append(cov_static_tau)
+                v_input = torch.cat(inputs, dim=-1)
+                if getattr(self, 'use_t_dyn', True):
+                    v = self.vnet_model(v_input, taus, (ts/dt).clamp(0, 1))
+                else:
+                    v = self.vnet_model(v_input, taus)
             if v.dim() == 4:
                 v = _center_crop_or_resize(v, self.img_size).view(v.size(0), -1)
+        else:
+            v = ut_tau.clone()
+            if split_bu < B:
+                if hasattr(self.vnet_model, '__class__') and self.vnet_model.__class__.__name__ == 'ConvVNetWrapper':
+                    if getattr(self, 'use_t_dyn', True):
+                        v_tail = self.vnet_model(
+                            xt_tau[split_bu:], x0_tau[split_bu:],
+                            (None if cov_dynamic_tau is None else cov_dynamic_tau[split_bu:]),
+                            (None if cov_static_tau  is None else cov_static_tau[split_bu:]),
+                            taus[split_bu:], (ts[split_bu:]/dt).clamp(0, 1)
+                        )
+                    else:
+                        v_tail = self.vnet_model(
+                            xt_tau[split_bu:], x0_tau[split_bu:],
+                            (None if cov_dynamic_tau is None else cov_dynamic_tau[split_bu:]),
+                            (None if cov_static_tau  is None else cov_static_tau[split_bu:]),
+                            taus[split_bu:]
+                        )
+                else:
+                    inputs = [xt_tau[split_bu:]]
+                    if self.include_x0_tau: inputs.append(x0_tau[split_bu:])
+                    if self.dim_cov_dynamic > 0 and cov_dynamic_tau is not None: inputs.append(cov_dynamic_tau[split_bu:])
+                    if self.dim_cov_static  > 0 and cov_static_tau  is not None: inputs.append(cov_static_tau[split_bu:])
+                    v_input = torch.cat(inputs, dim=-1)
+                    if getattr(self, 'use_t_dyn', True):
+                        v_tail = self.vnet_model(v_input, taus[split_bu:], (ts[split_bu:]/dt).clamp(0, 1))
+                    else:
+                        v_tail = self.vnet_model(v_input, taus[split_bu:])
+                if v_tail.dim() == 4:
+                    v_tail = _center_crop_or_resize(v_tail, self.img_size).view(v_tail.size(0), -1)
+                v[split_bu:] = v_tail
+
         
         return u0_tau, ut_tau, u, v, x0_0, xdt_0
             

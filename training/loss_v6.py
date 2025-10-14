@@ -13,11 +13,19 @@ and inflationary flow loss fns (for toy and image data).
 import torch
 from torch_utils import persistence
 from torch_cfm import conditional_flow_matching as cfm
-import numpy as np 
+# import numpy as np 
 
 
-def g_only(old, new):
-    return (old - new).detach() + new
+LAMBDA_MIX = 0.8
+def _mix_from_scores_local(scores, K):
+    probs = scores / (scores.sum() + 1e-12)
+    return (1.0 - LAMBDA_MIX) / float(K) + LAMBDA_MIX * probs
+
+
+# def g_only(old, new):
+#     return (old - new).detach() + new
+# e.g., g_only(w_tau.view(-1,1), w_tau_g.view(-1,1))
+
 
 #####################################################################
 #Legacy code from EDM repo
@@ -99,7 +107,7 @@ class EDMLoss:
 # Loss fn for VFM models         
 @persistence.persistent_class
 class VFMToyLoss:
-    def __init__(self, flow_matcher_type='exactot',
+    def __init__(self, flow_matcher_type='regular',
                  sigma_dynamics=0.1, 
                  sigma_compression=0.0,
                  normalize_lie=False,
@@ -108,15 +116,13 @@ class VFMToyLoss:
                  is_bins_tau=16,           # τ bins
                  is_bins_t=16,             # t bins (for t_dyn in [0,1])
                  is_ema=0.05,              # EMA step for second-moment tables
-                 is_eps=1e-8):
-
-        self._q_tau_cache = None          # cached mixed τ proposal (K_tau,)
-        self._q_tau_raw   = None          # last raw τ proposal (K_tau,)
-        self._row_probs_cache = None      # cached mixed per-τ t proposals (K_tau, K_t)
-        self._row_probs_raw   = None      # last raw per-τ t proposals (K_tau, K_t)
-        self.drift_tol = 0.02             # reuse cache if max |new-old| < drift_tol
+                 is_eps=1e-5,
+                 is_sqrt=False,
+                 uniform_tau_v=False,
+                 pre_no_flow = True):
 
         self.normalize_lie = normalize_lie
+        
         #get flow matcher for u 
         assert flow_matcher_type in ['exactot', 'regular', 'sinkhorn']
         
@@ -124,7 +130,6 @@ class VFMToyLoss:
         
         if flow_matcher_type=='regular': 
             self.tau_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma_compression)
-            
         elif flow_matcher_type=='exactot':
             self.tau_flowmatcher = cfm.ExactOptimalTransportConditionalFlowMatcher(sigma=sigma_compression)
         elif flow_matcher_type=='sinkhorn':
@@ -136,13 +141,16 @@ class VFMToyLoss:
         #this is always just regular flow matcher! 
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma_dynamics)
 
+        # IS 
         self.cmp_is = bool(cmp_is)
         self.dyn_is = bool(dyn_is)
         self.K_tau  = int(is_bins_tau)
         self.K_t    = int(is_bins_t)
         self.is_ema = float(is_ema)
         self.is_eps = float(is_eps)
-
+        self.is_sqrt = bool(is_sqrt)
+        self.uniform_tau_v = bool(uniform_tau_v)
+        self.pre_no_flow = bool(pre_no_flow)
         self.m_tau = torch.ones(self.K_tau)
         self.m_dyn = torch.ones(self.K_tau, self.K_t)
         
@@ -156,75 +164,104 @@ class VFMToyLoss:
         device = x0_1.device
         dt = float(dt)
 
+        # if pre-train don't have flow loss, don't calculate it to save time
+        if self.pre_no_flow and pre_training:
+            mod = getattr(net, 'module', net)
+            enc = getattr(mod, 'encoder', None)
+            if enc is None:
+                raise RuntimeError("Expected `net` to have .encoder during pre-train.")
+            # encoder forwards only
+            x0_0  = enc.rsample(x0_1)
+            xdt_0 = enc.rsample(xdt_1)
+            enc_pt_loss  = (x0_1 - x0_0)**2
+            enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2
+            zeros = torch.zeros_like(enc_pt_loss)
+            return torch.stack([zeros, zeros, enc_pt_loss, enc_lie_loss], dim=0)
+
+
+        # ----------------------------------------------------------------------------
+        # IS
         # lazy move second-moment tables to device
         if self.m_tau.device != device:
             self.m_tau = self.m_tau.to(device=device, dtype=torch.float32)
         if self.m_dyn.device != device:
             self.m_dyn = self.m_dyn.to(device=device, dtype=torch.float32)
 
-        # ---------- τ sampling (IS if cmp_is, else uniform) ----------
-        if self.cmp_is:
-            if self.dyn_is:
-                tau_score = (self.m_dyn.sum(dim=1) + self.is_eps).sqrt()     # [K_tau]
-            else:
-                tau_score = (self.m_tau + self.is_eps).sqrt()                # [K_tau]
-            q_raw = tau_score / (tau_score.sum() + self.is_eps)              # [K_tau]
-        
-            # reuse cached mixed proposal if drift is tiny
-            reuse = False
-            if self._q_tau_raw is not None:
-                drift = torch.max(torch.abs(q_raw - self._q_tau_raw)).item()
-                reuse = drift < self.drift_tol
-        
-            if reuse and (self._q_tau_cache is not None):
-                q_mix = self._q_tau_cache
-            else:
-                lam = 0.9
-                q_mix = (1 - lam) / float(self.K_tau) + lam * q_raw          # [K_tau]
-                self._q_tau_cache = q_mix.detach()
-                self._q_tau_raw   = q_raw.detach()
-        
-            # batched CDF sampling for τ (one uniform per example)
-            cdf_tau = torch.cumsum(q_mix, dim=0)
-            cdf_tau[-1] = 1.0
-            u_tau = torch.rand(B, device=device)
-            i_tau = torch.searchsorted(cdf_tau, u_tau, right=False).long().clamp_(0, self.K_tau - 1)
-            taus  = (i_tau.to(torch.float32) + torch.rand(B, device=device)) / float(self.K_tau)
-            w_tau = 1.0 / (q_mix[i_tau] * float(self.K_tau) + self.is_eps)
-        else:
-            taus  = torch.rand(B, device=device)
-            i_tau = torch.clamp((taus * self.K_tau).long(), 0, self.K_tau - 1)
-            w_tau = torch.ones(B, device=device)
+        # split the batch used for IS for u_net and v_net
+        B_u = (B // 2) if (self.cmp_is and self.dyn_is) else (B if self.cmp_is else 0)
+        B_v = B - B_u
 
-        # ---------- t sampling (IS if dyn_is, else uniform) ----------
-        if self.dyn_is:
-            # Build per-τ proposal over t once, then gather rows for the batch
-            row_scores = (self.m_dyn + self.is_eps).sqrt()                                              # [K_tau, K_t]
-            row_probs  = row_scores / (row_scores.sum(dim=1, keepdim=True) + self.is_eps)               # [K_tau, K_t]
-            lam = 0.9
-            row_mix   = (1 - lam) / self.K_t + lam * row_probs                                          # [K_tau, K_t]
-        
-            # Select rows for current τ indices
-            row_b = row_mix.index_select(0, i_tau)                                                      # [B, K_t]
-        
-            # Batched CDF sampling: one uniform per example
-            cdf = torch.cumsum(row_b, dim=1)
-            cdf[:, -1] = 1.0                                                                            # numeric guard
-            u = torch.rand(B, device=device).unsqueeze(1)                                               # [B, 1]
-            j_t = torch.searchsorted(cdf, u, right=False).squeeze(1).long().clamp_(0, self.K_t - 1)     # [B]
-        
-            # Dequantized t in [0, dt]
-            tnorm = (j_t.to(torch.float32) + torch.rand(B, device=device)) / float(self.K_t)
-            ts = tnorm * dt
-        
-            # Importance weights for chosen cells
-            sel = row_b.gather(1, j_t.view(-1, 1)).squeeze(1)                                           # [B]
-            w_t = 1.0 / (sel * float(self.K_t) + self.is_eps)                                           # [B]
-        else:
-            tnorm = torch.rand(B, device=device)                                                        # U[0,1]
-            ts = tnorm * dt
-            j_t = torch.clamp((tnorm * self.K_t).long(), 0, self.K_t - 1)
-            w_t = torch.ones(B, device=device)
+        taus  = torch.empty(B, device=device)
+        i_tau = torch.empty(B, dtype=torch.long, device=device)
+        tnorm = torch.empty(B, device=device)
+        j_t   = torch.empty(B, dtype=torch.long, device=device)
+
+        w_tau_u = torch.ones(B, device=device)   # used on [:B_u]
+        w_tau_v = torch.ones(B, device=device)   # used on [B_u:]
+        w_t     = torch.ones(B, device=device)   # used on [B_u:]
+
+        # ---- compression flow (u_net) subset (compression; tau only) ----
+        if B_u > 0:
+            if self.cmp_is:
+                s_u = self.m_tau + self.is_eps
+                if self.is_sqrt: s_u = s_u.sqrt()
+                q_tau_u = _mix_from_scores_local(s_u, self.K_tau)
+            else:
+                q_tau_u = torch.full((self.K_tau,), 1.0 / self.K_tau, device=device)
+
+            cdf = torch.cumsum(q_tau_u, dim=0); cdf[-1] = 1.0
+            u = torch.rand(B_u, device=device)
+            i_u = torch.searchsorted(cdf, u, right=False).clamp_(0, self.K_tau - 1)
+            taus[:B_u] = (i_u.float() + torch.rand(B_u, device=device)) / float(self.K_tau)
+            i_tau[:B_u] = i_u
+            w_tau_u[:B_u] = 1.0 / (q_tau_u[i_u] * float(self.K_tau) + self.is_eps)
+
+            # t not used by L_u; keep uniform placeholders
+            tnorm[:B_u] = torch.rand(B_u, device=device)
+            j_t[:B_u]   = torch.clamp((tnorm[:B_u] * self.K_t).long(), 0, self.K_t - 1)
+
+        # ---- dynamic flow (v_net) subset (dynamics; tau and t_dyn) ----
+        if B_v > 0:
+            start, end = B_u, B
+
+            # tau for v: learned unless uniform_tau_v=True or dyn_is=False
+            if self.dyn_is and (not self.uniform_tau_v):
+                tau_marg = self.m_dyn.sum(dim=1)
+                s_v = tau_marg + self.is_eps
+                if self.is_sqrt: s_v = s_v.sqrt()
+                q_tau_v = _mix_from_scores_local(s_v, self.K_tau)
+            else:
+                q_tau_v = torch.full((self.K_tau,), 1.0 / self.K_tau, device=device)
+
+            cdf = torch.cumsum(q_tau_v, dim=0); cdf[-1] = 1.0
+            u = torch.rand(B_v, device=device)
+            i_v = torch.searchsorted(cdf, u, right=False).clamp_(0, self.K_tau - 1)
+            taus[start:end] = (i_v.float() + torch.rand(B_v, device=device)) / float(self.K_tau)
+            i_tau[start:end] = i_v
+            w_tau_v[start:end] = 1.0 / (q_tau_v[i_v] * float(self.K_tau) + self.is_eps)
+
+            # t_dyn | tau for v
+            if self.dyn_is:
+                row_scores = self.m_dyn + self.is_eps                              # [K_tau, K_t]
+                if self.is_sqrt: row_scores = row_scores.sqrt()
+                row_probs = row_scores / (row_scores.sum(dim=1, keepdim=True) + self.is_eps)
+                row_mix  = (1.0 - LAMBDA_MIX) / float(self.K_t) + LAMBDA_MIX * row_probs
+
+                rows = row_mix.index_select(0, i_v)                                 # [B_v, K_t]
+                cdf_t = torch.cumsum(rows, dim=1); cdf_t[:, -1] = 1.0
+                uu = torch.rand(B_v, device=device).unsqueeze(1)
+                jv = torch.searchsorted(cdf_t, uu, right=False).squeeze(1).clamp_(0, self.K_t - 1)
+
+                tnorm[start:end] = (jv.float() + torch.rand(B_v, device=device)) / float(self.K_t)
+                j_t[start:end]   = jv
+                sel = rows.gather(1, jv.view(-1, 1)).squeeze(1)
+                w_t[start:end]   = 1.0 / (sel * float(self.K_t) + self.is_eps)
+            else:
+                tnorm[start:end] = torch.rand(B_v, device=device)
+                j_t[start:end]   = torch.clamp((tnorm[start:end] * self.K_t).long(), 0, self.K_t - 1)
+
+        # map normalized t to real seconds
+        ts = tnorm * dt
 
         # ---------------------------
         # Forward pass through network (unchanged API)
@@ -233,7 +270,8 @@ class VFMToyLoss:
             x0_1, xdt_1, taus, ts, dt,
             self.tau_flowmatcher, self.t_flowmatcher,
             cov_dynamic_0=cov_dynamic_0, cov_dynamic_dt=cov_dynamic_dt,
-            cov_static=cov_static
+            cov_static=cov_static,
+            split_bu=B_u
         )
 
         flow_sq = (u - u0_tau) ** 2               # [B, D]
@@ -241,101 +279,55 @@ class VFMToyLoss:
         flow_scalar = flow_sq.mean(dim=1)         # [B] for EMA
         dyn_scalar  = dyn_sq.mean(dim=1)
 
-        # option 1: vanilla apply IS weights only for the dimensions we importance-sampled
-        # flow_loss = flow_sq * (w_tau.view(-1, 1) if self.cmp_is else 1.0)
-        # dyn_w = torch.ones(B, 1, device=device)
-        # if self.cmp_is:
-        #     dyn_w *= w_tau.view(-1, 1)
-        # if self.dyn_is:
-        #     dyn_w *= w_t.view(-1, 1)
-        # dyn_loss = dyn_sq * dyn_w
+        flow_loss = flow_sq.clone()
+        dyn_loss  = dyn_sq.clone()
 
-        # option 2: batch-normalized weights for gradient
-        eps = self.is_eps
-        if self.cmp_is:
-            w_tau_g = w_tau / (w_tau.mean() + eps)
-            w_tau_g = torch.clamp(w_tau_g, max=10.0)  # tune 2–10 if needed
-        
-        if self.dyn_is:
-            w_t_g = w_t / (w_t.mean() + eps)
-            w_t_g = torch.clamp(w_t_g, max=10.0)
-        
-        # Compression (u)
-        if self.cmp_is:
-            flow_loss = g_only(w_tau.view(-1,1), w_tau_g.view(-1,1)) * flow_sq
-        else:
-            flow_loss = flow_sq
-        
-        # Dynamics (v)
-        dyn_w = torch.ones(B, 1, device=device)
-        if self.cmp_is: dyn_w = dyn_w * w_tau.view(-1,1)
-        if self.dyn_is: dyn_w = dyn_w * w_t.view(-1,1)
-        
-        if self.cmp_is or self.dyn_is:
-            dyn_w_g = torch.ones_like(dyn_w)
-            if self.cmp_is: dyn_w_g = dyn_w_g * w_tau_g.view(-1,1)
-            if self.dyn_is: dyn_w_g = dyn_w_g * w_t_g.view(-1,1)
-            dyn_loss = g_only(dyn_w, dyn_w_g) * dyn_sq
-        else:
-            dyn_loss = dyn_sq
-        
+        # split samples for two flows.
+        if self.cmp_is and self.dyn_is:
+            flow_loss[B_u:] = 0.0
+            dyn_loss[:B_u]  = 0.0
 
-        # ---------------------------------------------------------------------------
-        
-        if pre_training:
-            #compute reconstruction loss
-            enc_pt_loss = (x0_1 - x0_0)**2
+        # compression weights
+        if self.cmp_is and B_u > 0:
+            flow_loss[:B_u] = flow_loss[:B_u] * w_tau_u[:B_u].view(-1, 1)
 
+        # dynamics weights
+        if self.dyn_is and B_v > 0:
+            eff = (w_tau_v[B_u:] * w_t[B_u:]).view(-1, 1)
+            dyn_loss[B_u:] = dyn_loss[B_u:] * eff
             
-            #set conditional Lie loss to zero 
-            enc_lie_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
-
-            # don' train dynamic flow during pre_training?? (Let's first make sure compression flow is correct...)
-            # dyn_loss = dyn_loss*0
-            # flow_loss = flow_loss*0
-            
-            
-        else:
-            #set reconstruction loss to zero
-            enc_pt_loss = (x0_1 - x0_0)**2
-            
-            #compute conditional Lie loss 
-            enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2 #bs, dim 
+        # encoder loss: reconstruction & Lie
+        enc_pt_loss  = (x0_1 - x0_0)**2
+        enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2
 
         # IS bins weight update
         with torch.no_grad():
             a = self.is_ema
-        
-            # τ table: use bincount to aggregate per-bin means
-            if self.cmp_is:
-                idx_tau = i_tau                                # [B]
-                cnt_tau = torch.bincount(idx_tau, minlength=self.K_tau)                     # [K_tau]
-                sumsq_tau = torch.bincount(idx_tau, weights=(flow_scalar ** 2),
-                                           minlength=self.K_tau)                             # [K_tau]
-                mean_tau = torch.zeros_like(self.m_tau)
-                nonzero_tau = cnt_tau > 0
-                mean_tau[nonzero_tau] = sumsq_tau[nonzero_tau] / cnt_tau[nonzero_tau].to(sumsq_tau.dtype)
-                # EMA only where updated
-                self.m_tau = torch.where(nonzero_tau,
-                                         (1.0 - a) * self.m_tau + a * mean_tau,
-                                         self.m_tau)
-        
-            # (τ,t) table: flatten (i,j) → k = i*K_t + j, then bincount once
-            if self.dyn_is:
-                flat = i_tau * self.K_t + j_t                                                      # [B]
-                cnt_flat = torch.bincount(flat, minlength=self.K_tau * self.K_t)                  # [K_tau*K_t]
-                sumsq_flat = torch.bincount(flat, weights=(dyn_scalar ** 2),
-                                            minlength=self.K_tau * self.K_t)                      # [K_tau*K_t]
-                mean_flat = torch.zeros_like(sumsq_flat)
-                nonzero_flat = cnt_flat > 0
-                mean_flat[nonzero_flat] = sumsq_flat[nonzero_flat] / cnt_flat[nonzero_flat].to(sumsq_flat.dtype)
-        
-                m_flat = self.m_dyn.view(-1)
-                m_flat = torch.where(nonzero_flat,
-                                     (1.0 - a) * m_flat + a * mean_flat,
-                                     m_flat)
-                self.m_dyn = m_flat.view(self.K_tau, self.K_t)
 
+            # tau table from U subset
+            if self.cmp_is and B_u > 0:
+                idx = i_tau[:B_u]
+                cnt = torch.bincount(idx, minlength=self.K_tau)
+                meas = (flow_scalar[:B_u]**2) if self.is_sqrt else flow_scalar[:B_u]
+                sums = torch.bincount(idx, weights=meas, minlength=self.K_tau)
+                mean = torch.zeros_like(self.m_tau)
+                nz = cnt > 0
+                mean[nz] = sums[nz] / cnt[nz].to(sums.dtype)
+                self.m_tau = torch.where(nz, (1.0 - a) * self.m_tau + a * mean, self.m_tau)
+
+            # (tau,t_dyn) table from V subset
+            if self.dyn_is and B_v > 0:
+                idx_tau = i_tau[B_u:]; idx_t = j_t[B_u:]
+                flat = idx_tau * self.K_t + idx_t
+                cnt  = torch.bincount(flat, minlength=self.K_tau * self.K_t)
+                meas = (dyn_scalar[B_u:]**2) if self.is_sqrt else dyn_scalar[B_u:]
+                sums = torch.bincount(flat, weights=meas, minlength=self.K_tau * self.K_t)
+                mean_flat = torch.zeros_like(sums)
+                nz = cnt > 0
+                mean_flat[nz] = sums[nz] / cnt[nz].to(sums.dtype)
+                m_flat = self.m_dyn.view(-1)
+                m_flat = torch.where(nz, (1.0 - a) * m_flat + a * mean_flat, m_flat)
+                self.m_dyn = m_flat.view(self.K_tau, self.K_t)
         
 
         return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), enc_pt_loss.unsqueeze(0), \
