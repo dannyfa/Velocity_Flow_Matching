@@ -1,85 +1,274 @@
-## Velocity Flow Matching: Compression and Dynamics Learning with Flow Matching! <br>
+# Dynamic Compression Flows for Neuroscience Data
 
-Main goal of this project is to utilize flow matching ideas to construct a model capable of performing compression (i.e., dimensionality reduction) while also learning and preserving intrinsic dynamics.
+This repository contains code for **Dynamic Compression Flows (DCF)**, a flow-matching framework for learning low-dimensional representations of high-dimensional dynamical data while preserving temporal structure.
 
-As of right now, this code only supports training networks on toy datasets and small image (toy-like) datasets.
+DCF learns two coupled vector fields:
 
-## Requirements
+1. A **compressive/generative flow** that maps between data space and a compressed latent representation.
+2. A **dynamical flow** that models time evolution at each compression level.
 
-* Linux and Windows are supported, but we recommend Linux for performance and compatibility reasons.
-* 1 high-end NVIDIA GPU. All testing and development done using NVIDIA RTX 3090 and 4090 GPUs. Code tested for single-GPU training and generation, though it can easily be adapted for multi-GPU setting.
-* 64-bit Python 3.8 and PyTorch 2.1.2. See https://pytorch.org for PyTorch install instructions.
-* Python libraries: See [environment.yml](./environment.yml) for exact library dependencies. You can use the following commands with Miniconda3 to create and activate your Python environment:
-  - `conda env create -f environment.yml -n vfm`
-  - `conda activate vfm`
+The model uses an encoder-based coupling to define source and target pairs for flow matching. Low-dimensional latent support is encouraged using nested dropout, which orders latent dimensions by construction and supports controllable dimensionality reduction.
 
+The current codebase still uses some older `VFM` naming conventions, but the implementation corresponds to the DCF training pipeline used in the paper.
 
-## Training New Models
+## Repository structure
 
-**Toy DataSets**
-
-To train a model on a given toy dataset, run:
-
-```.bash
-torchrun --rdzv_endpoint=0.0.0.0:29501 toy_train_vfm.py --outdir=out --data_name=<dset_name> \
---data_dim=2 --dims_to_keep=2
+```text
+.
+├── vfm_train_v7.py              # Main training entry point
+├── run_example.txt              # Example commands for ball and maze experiments
+├── environment.yml              # Conda environment
+├── training/
+│   ├── loss_v7.py               # DCF training losses
+│   ├── networks_v7.py           # Encoder, compression flow, and dynamics networks
+│   └── toy_training_loop_vfm_v7.py
+├── torch_cfm/                   # Flow matching utilities
+├── analysis/                    # Analysis notebooks and plotting code
+├── plot_sim_results_v7.py
+├── plot_sim_results_img_v7.py
+├── plot_neural.py
+├── plot_neural_v7.py
+├── plot_musal_v5.py
+├── dnnlib/
+└── torch_utils/
 ```
 
-Code supports following options for toy datasets:
+## Installation
 
-1) 2D doublecircles (`doublecircles`)
-2) 2D vanderpol (`vanderpol`)
-3) 2D SDE (`doublesdeorbit`)
-4) 3D rossler (`rossler`)
-5) 3D Lorenz (`lorenz63`)
-6) Higher-D Lorenz (`lorenz63`) - change param `d` to change dimensionality of Lorenz system.
-7) Balls Image dataset (`balls`).
+Create and activate the conda environment:
 
-For additional details and argument options please check actual `toy_train_vfm.py` script.
-
-## Simulating Evolution of Flow and/or Dynamics Networks
-
-**Toy Datasets**
-
-To simulate entire trajectories for several possible flow times (`taus`), use `toy_dynamics_traj_sim.py`, as follows:
-
-```.bash
-torchrun --rdzv_endpoint=0.0.0.0:29501 toy_dynamics_traj_sim.py --outdir=out --network=net.pkl \
---n_trajs=100 --traj_len=1000 --taus=0.0,0.25,0.50,0.75,1.0 --data_name=<dset_name> --data_dim=2 --dims_to_keep=2
+```bash
+conda env create -f environment.yml -n vfm
+conda activate vfm
 ```
 
-This will simulate 100 full trajectories, each with 1K time steps, with flow time `tau` evaluated at each one of the float values
-passed to `--taus`. Network here should be a trained net saved inside a pickled file. By default script saves trajectories as .npz files
-inside a subdirectory called `dynamics_traj_net_sims` which is created under the given output root dir. Additionally, script will
-also save a .json file containing all the parameters passed on/used to simulate the trajectories.
+The code was developed for Python 3.8 and PyTorch 2.1.2. A CUDA-capable NVIDIA GPU is recommended.
 
-Another option is to alternate simulation/integration between the dynamics and flow networks. This generates trajectories which have
-different pieces/number of steps evaluated at different (increasing) flow times `taus`. To run this option, use:
+## Data format
 
-```.bash
-torchrun --rdzv_endpoint=0.0.0.0:29501 toy_alternating_flow_dyn_traj_sim.py --outdir=out --network=net.pkl \
---tps_per_tau=200 --num_taus=5 --data_name=<dset_name> --data_dim=2 --dims_to_keep=2 --n_trajs=100
+The main training script expects a data folder passed through `--data_path`.
+
+The required file is:
+
+```text
+dataset_samples.npz
 ```
 
-This will construct 100 trajectories using alternating integration between dynamics and flow networks. Number of time steps to evolve
-in dynamics net before changing flow time `tau` is indicated by `--tps_per_tau` and the total number of linearly spaced transitions/increases
-in flow time `tau` is given by `--num_taus`. Code will always start from `tau==0` and end in `tau==1`. Note that total trajectory length is
-determined by both `--tps_per_tau` and `--num_taus`.
+It must contain the key:
 
-## Branch info/basics
+```text
+samples
+```
 
-Most of the info you care about will be in the following 3 branches:
+Supported sample formats include vector-valued trajectories,
 
-`main` -- Contains original code with implementation of simple reconstruction-based pretraining loss (a.k.a. encoder loss) and using torch autograd functionality to compute Lie derivative loss ONLY AFTER a given pre-training number of Mimgs. We turned away from this due to how slow/costly it was to actually compute desired Jacobian vector product (JVP) using torch atugrad functionality.
+```text
+n_trials x T x D
+```
 
-`global_new_param_new_pt` -- Updates to `main` to use instead conditional Lie derivative form we mentioned in notes (as opposed to autograd computed Lie derivative/JVP). Here parameterization of L and D is global, and only encoder/proposal means are locally parameterized.
+and image-like trajectories,
 
-`local_new_param_new_pt` -- Updates to `main` to use instead conditional Lie derivative form we mentioned in notes (as opposed to autograd computed Lie derivative/JVP). Here L, D, and means are ALL locally parameterized.
+```text
+n_trials x T x C x H x W
+```
 
-Of note, both `global_new_param_new_pt` and `local_new_param_new_pt` begin pre-training with flow net loss, dyn net loss, and simple encoder reconstruction loss. After specified pre-training number of Mimgs, conditional Lie loss component is added to global loss. This set up seems to be more stable from toy experiments I ran back in April/May.
+Optional covariate files are:
 
-You will also see:
+```text
+cov_dynamic_samples.npy
+cov_static_samples.npy
+```
 
-`JVP-Investigation` -- Contains some work an undergrad RA working with us on Spring did trying to optimize autograd computation of our desired JVP. This is obsolete at this point, so DO NOT WORRY ABOUT IT.
+Use the corresponding flags when covariates are available:
 
-`model_comparison` -- Branch containing some of the original notebooks Miles Martinez created to run models we will likely want to compare our vfm model against. Most of these nbs are now incorporated into `comparison_testing_notebooks` subdir under main so feel free to check these out. Miles will probably be the one working more on these for additional experiments. Overall, we tried to keep code for comparison models strictly on these nbs and separate from rest of repo (we might wish to integrate it in future - TBD).
+```bash
+--use_dynamic_covariates
+--use_static_covariates
+```
+
+Lag-history covariates are controlled by:
+
+```bash
+--lag_k <K>
+```
+
+For vector-valued data, lagged observations are concatenated as history covariates. For image-like data, lagged image histories are handled internally.
+
+## Quick start
+
+A minimal training command has the following form:
+
+```bash
+python vfm_train_v7.py \
+  --data_path data/<dataset_folder> \
+  --data_name <dataset_name> \
+  --outdir out/<experiment_name> \
+  --k_max <max_latent_budget> \
+  --k_target <effective_latent_dim> \
+  --lag_k <history_length> \
+  --dt <time_step> \
+  --duration <training_duration> \
+  --batch <batch_size> \
+  --batch_gpu <per_gpu_batch_size> \
+  --dyn_arch <dynamics_network> \
+  --flow_arch <compression_network> \
+  --encoder_arch <encoder_network> \
+  --alpha 1.0 \
+  --beta 1.0 \
+  --eta 1.0
+```
+
+See `run_example.txt` for complete commands for the rotating-ball and maze/neural examples.
+
+## Example architectures
+
+For vector-valued neural data, the paper uses MLP-based encoder, compression flow, and dynamical flow networks. A typical setup is:
+
+```bash
+--dyn_arch ToyMLP \
+--flow_arch ToyMLP \
+--encoder_arch Latent_MLP_VAE \
+--encoder_depth 4 \
+--encoder_width 256 \
+--mlp_depth_cmp 4 \
+--mlp_width_cmp 256 \
+--mlp_depth_dyn 4 \
+--mlp_width_dyn 512
+```
+
+For image-like data, the paper uses convolutional encoder-decoder networks:
+
+```bash
+--dyn_arch ToyConvUNet \
+--flow_arch ToyConvUNet \
+--encoder_arch Latent_LargeCNN_VAE \
+--conv_ch_cmp 32,64,128,256 \
+--conv_embed_cmp 256 \
+--conv_ch_dyn 32,64,128,256 \
+--conv_embed_dyn 256 \
+--conv_ch_enc 32,64,128,256
+```
+
+## Important options
+
+### Latent dimension
+
+```bash
+--k_max <INT>
+```
+
+sets the maximum latent budget.
+
+```bash
+--k_target <INT>
+```
+
+fixes the effective nested-dropout latent dimension. If omitted, adaptive nested dropout is used.
+
+### Loss weights
+
+```bash
+--alpha
+```
+
+weights the compressive flow-matching loss.
+
+```bash
+--beta
+```
+
+weights the dynamical flow-matching loss.
+
+```bash
+--eta
+```
+
+weights the encoder alignment loss.
+
+```bash
+--gamma
+```
+
+weights the optional Lie consistency loss.
+
+### Flow matching type
+
+```bash
+--flow_matcher_type regular
+--flow_matcher_type exactot
+--flow_matcher_type sinkhorn
+```
+
+### Dynamics time input
+
+```bash
+--use_t_dyn
+```
+
+adds normalized dynamics time to the dynamical flow input.
+
+### Stabilizing long runs
+
+For long runs where the latent space may drift, the encoder alignment weight can be decayed:
+
+```bash
+--eta_decay_start_kimg 3000
+--eta_decay_halflife_kimg 1000
+--eta_floor 0.0
+```
+
+## Experiments
+
+The manuscript evaluates DCF on:
+
+1. **Rotating-ball simulation**  
+   Short grayscale videos of a moving ball. This tests whether DCF can recover simple low-dimensional dynamics from high-dimensional image data.
+
+2. **Neural population activity**  
+   Center-out reaching data from non-human primates. DCF is evaluated through latent geometry, reconstruction quality, and downstream decoding of cursor velocity.
+
+3. **Mouse behavioral video**  
+   Long behavioral video from Musall et al. DCF identifies structured low-dimensional behavioral states and transient outliers.
+
+4. **Birdsong audio**  
+   Sequential spectrograms from birdsong motifs. DCF learns smooth latent trajectories and rollouts that preserve syllable-level structure.
+
+## Outputs
+
+Training outputs are written to:
+
+```text
+--outdir
+```
+
+The script also saves processed data under:
+
+```text
+<outdir>/data/
+```
+
+Typical outputs include processed trajectories, covariates, lag-history arrays, network snapshots, training state dumps, and logs.
+
+## Notes
+
+This is research code and is actively evolving. Some function names, filenames, and command-line flags still reflect earlier Velocity Flow Matching naming. For DCF experiments, use `vfm_train_v7.py` as the main entry point.
+
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@inproceedings{wei2026dynamic,
+  title = {Dynamic Compression Flows for Neuroscience Data},
+  author = {Wei, Ganchao and de Albuquerque, Daniela and Martinez, Miles and Pan, Shiyang and Pearson, John},
+  booktitle = {Proceedings of the 43rd International Conference on Machine Learning},
+  volume = {306},
+  year = {2026}
+}
+```
+
+Please update the BibTeX entry with final page numbers once available.
+
+## License
+
+Please add a repository-level license file before public release.
