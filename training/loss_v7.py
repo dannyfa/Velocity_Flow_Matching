@@ -13,8 +13,19 @@ and inflationary flow loss fns (for toy and image data).
 import torch
 from torch_utils import persistence
 from torch_cfm import conditional_flow_matching as cfm
-import numpy as np 
+import torch, torch.nn.functional as F
+# import numpy as np 
 
+# # this is remained for IS....
+# LAMBDA_MIX = 0.8
+# def _mix_from_scores_local(scores, K):
+#     probs = scores / (scores.sum() + 1e-12)
+#     return (1.0 - LAMBDA_MIX) / float(K) + LAMBDA_MIX * probs
+
+
+# def g_only(old, new):
+#     return (old - new).detach() + new
+# e.g., g_only(w_tau.view(-1,1), w_tau_g.view(-1,1))
 
 #####################################################################
 #Legacy code from EDM repo
@@ -96,72 +107,62 @@ class EDMLoss:
 # Loss fn for VFM models         
 @persistence.persistent_class
 class VFMToyLoss:
-    def __init__(self,
-                 flow_matcher_type='exactot', 
+    def __init__(self, flow_matcher_type='regular',
                  sigma_dynamics=0.1, 
-                 sigma_compression=0.0,
-                 normalize_lie=False):
+                 sigma_compression=0.0
+                ):
         
-        self.normalize_lie = normalize_lie
         #get flow matcher for u 
-        assert flow_matcher_type in ['exactot', 'regular']
-        
+        assert flow_matcher_type in ['exactot', 'regular', 'sinkhorn']
         self.flow_matcher_type = flow_matcher_type
         
         if flow_matcher_type=='regular': 
             self.tau_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma_compression)
-            
         elif flow_matcher_type=='exactot':
             self.tau_flowmatcher = cfm.ExactOptimalTransportConditionalFlowMatcher(sigma=sigma_compression)
+        elif flow_matcher_type=='sinkhorn':
+            self.tau_flowmatcher = cfm.GeneralOptimalTransportConditionalFlowMatcher(sigma=sigma_compression, OTmethod = 'sinkhorn')
         else: 
-            raise NotImplementedError('Only ifs or exactot fm  supported!')
+            raise NotImplementedError('Only ifs, exactot or sinkhorn fm  supported!')
         
         #get flow matcher for v 
         #this is always just regular flow matcher! 
         self.t_flowmatcher = cfm.ConditionalFlowMatcher(sigma=sigma_dynamics)
-    
-    def calc_lie_derivative(self, u, v, nabla_u, nabla_v, partial_tau_v):
+        self.last_unmasked_sum = None
         
-        # calc whole (un-normalized) Lie derivative 
-        # \partial_tau_v + u \cdot \nabla_v - v \cdot \nabla_u 
-        lie_derivative = partial_tau_v #bs, dim
-        lie_derivative += torch.einsum('bij, bjk -> bik', u.unsqueeze(1), nabla_v).squeeze(1) #bs, dim
-        lie_derivative -= torch.einsum('bij, bjk -> bik', v.unsqueeze(1), nabla_u).squeeze(1) #bs, dim 
-        
-        #if desired, normalize it by L2 norms of u, v
-        if self.normalize_lie:
-            norm_u = torch.linalg.norm(u, ord=2, dim=-1) #bs 
-            norm_v = torch.linalg.norm(v, ord=2, dim=-1) #bs 
-            lie_derivative /= (norm_u * norm_v)[:, None]
-            
-        return lie_derivative
-        
-                
-    def __call__(self, net, x0_1, xdt_1, dt, pre_training=False):
+    def __call__(self, net, x0_1, xdt_1, dt, 
+                 cov_dynamic_0=None, cov_dynamic_dt=None, cov_static=None):
+
         
         #sample taus, ts
-        taus = torch.rand(x0_1.shape[0], device=x0_1.device) # \tau \sim U[0,1]
-        ts = torch.rand(xdt_1.shape[0], device=xdt_1.device) * dt #\t \sim U[0, dt]
-        
-        #pass these to net obj
-        u0_tau, ut_tau, u, v, nabla_u, nabla_v, partial_tau_v, x0_0 = net(x0_1, xdt_1, taus, ts, dt, \
-                                                                    self.tau_flowmatcher, self.t_flowmatcher, pre_training=pre_training)
-        
-        #calc different loss pieces 
-        
-        #flow, dyn, enc losses 
+        B = x0_1.shape[0]
+        device = x0_1.device
+        dt = float(dt)
+
+        taus = torch.rand(B, device=device)
+        ts = torch.rand(B, device=device) * dt
+
+        # ---------------------------
+        # Forward pass through network
+        # ---------------------------
+        u0_tau, ut_tau, u, v, x0_0, xdt_0, x0_0_mask, xdt_0_mask = net(
+            x0_1, xdt_1, taus, ts, dt,
+            self.tau_flowmatcher, self.t_flowmatcher,
+            cov_dynamic_0=cov_dynamic_0,
+            cov_dynamic_dt=cov_dynamic_dt,
+            cov_static=cov_static,
+        )
+
         flow_loss = (u - u0_tau)**2 #bs, dim
         dyn_loss = (v - ut_tau) **2 #bs, dim
-        enc_loss = (x0_0 - x0_1)**2 #bs, dim 
         
-        if pre_training:
-            #set lie loss to zero -- we are NOT computing Lie regularizer yet 
-            lie_loss = torch.zeros(x0_1.shape[0], x0_1.shape[1]).type(torch.float32).to(x0_1.device)
+        enc_pt_loss  = (x0_1 - x0_0_mask)**2
+        with torch.no_grad():
+            self.last_unmasked_sum = float(((x0_1 - x0_0)**2).sum().detach())
         
-        else: 
-            #lie loss
-            lie_loss = (self.calc_lie_derivative(u, v, nabla_u, nabla_v, partial_tau_v))**2 
-        
-        return torch.cat([flow_loss.unsqueeze(0), dyn_loss.unsqueeze(0), enc_loss.unsqueeze(0), \
-                          lie_loss.unsqueeze(0)], dim=0) # 4, bs, dim 
+        enc_lie_loss = (xdt_1 - x0_1 - xdt_0 + x0_0)**2
+
+        return torch.cat([flow_loss.unsqueeze(0),
+                          dyn_loss.unsqueeze(0), enc_pt_loss.unsqueeze(0), \
+                          enc_lie_loss.unsqueeze(0)], dim=0) # 4, bs, dim 
         

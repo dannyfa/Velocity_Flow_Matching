@@ -452,7 +452,6 @@ class Balls(ToyData):
 
 
 class ToyDsetDynamics(Dataset):
-
     """
     dataloader for toy datasets with dynamics. expects data in the form of that created by
     my toy data creation methods -- in other words, a list of np.arrays.
@@ -460,31 +459,75 @@ class ToyDsetDynamics(Dataset):
     This set of valid indices is also based on nForward: the number of steps forward in time
     that we want our model to predict. 
     When sampling, will return samples of length nForward + 2 (last index is dt)
+    
+    Now also handles time-varying covariates if provided.
     """
 
-    def __init__(self,data,dt,nForward=1) -> None:
-        
-
+    def __init__(self, data, dt, nForward=1, cov_dynamic_data=None, cov_static_data=None,
+                image_lag_source=None, lag_k=0):
         self.maxForward = nForward
-        exampleInd = np.random.choice(len(data),1)[0] #choose a traj at random 
-        self.exampleTraj = data[exampleInd] #get traj we sampled
-        lens = list(map(len,data)) #list with lengths of trajs (should be all equal for toys) 
-        lens2 = [0] + list(np.cumsum([l for l in lens][:-1])) #cumsum over total number of pts across trajs 
-        #sets ranging from 0  to traj length -- constructs one per traj 
+        exampleInd = np.random.choice(len(data), 1)[0]
+        self.exampleTraj = data[exampleInd]
+        
+        lens = list(map(len, data))
+        lens2 = [0] + list(np.cumsum([l for l in lens][:-1]))
         sets = [np.vstack([np.arange(ii, l+ ii - self.maxForward) for ii in range(self.maxForward + 1)]).T for l in lens]
-        sumSets = [p+l for p,l in zip(sets,lens2)] #shifts sets appropriately 
-        validInds = np.vstack(sumSets) #stacks all sets
-        self.data= np.vstack(data) #stacks all trajs, 
+        sumSets = [p+l for p,l in zip(sets,lens2)]
+        validInds = np.vstack(sumSets)
+        
+        self.data = np.vstack(data)
         self.data_inds = validInds 
         self.dt = dt
         self.length = len(validInds)
 
-    def __len__(self):
+        self.cov_dynamic_data = None
+        if cov_dynamic_data is not None:
+            cov_lens = list(map(len, cov_dynamic_data))
+            assert lens == cov_lens, "Dynamic covariate trajectories must have same lengths as data trajectories"
+            self.cov_dynamic_data = np.vstack(cov_dynamic_data)
 
+        self.is_image = (self.exampleTraj.ndim == 4)  # (T,C,H,W)
+        if self.is_image:
+            _, self.C, self.H, self.W = self.exampleTraj.shape
+        else:
+            self.C = self.H = self.W = None
+        
+
+        # Handle dynamic covariates
+        self.cov_static_data = None
+        self.cov_static_list = None   # NEW: for images we keep list, not vstack
+        if cov_static_data is not None:
+            if isinstance(cov_static_data, np.ndarray) and len(cov_static_data.shape) == 2:
+                expanded_static = []
+                for i, l in enumerate(lens):
+                    expanded_static.append(np.tile(cov_static_data[i:i+1], (l, 1)))
+                self.cov_static_data = np.vstack(expanded_static)
+            else:
+                # list of arrays [T, dim_static] — for images we keep it as a list
+                if self.is_image:
+                    self.cov_static_list = [np.asarray(a) for a in cov_static_data]  # NEW
+                else:
+                    cov_lens = list(map(len, cov_static_data))
+                    assert lens == cov_lens, "Static covariate trajectories must have same lengths as data trajectories"
+                    self.cov_static_data = np.vstack(cov_static_data)
+
+        self.image_lag_source = image_lag_source if self.is_image else None
+        self.lag_k = int(lag_k) if self.is_image else 0
+
+        # NEW: keep trial offsets to map flat indices → (trial_id, local_t)
+        self.trial_offsets = np.array([0] + list(np.cumsum(lens)[:-1]))
+        self.trial_lengths = np.array(lens)
+
+    def _flat_index_to_trial_t(self, flat_idx: int):
+        # Find trial j such that trial_offsets[j] <= flat_idx < trial_offsets[j] + trial_lengths[j]
+        j = int(np.searchsorted(self.trial_offsets[1:], flat_idx, side='right'))
+        t_local = flat_idx - int(self.trial_offsets[j])
+        return j, t_local
+
+    def __len__(self):
         return self.length 
     
     def __getitem__(self, index):
-        
         single_index = False
         result = []
         try:
@@ -495,16 +538,56 @@ class ToyDsetDynamics(Dataset):
 
         for ii in index:
             inds = self.data_inds[ii]
-
+            
+            # Get data samples
             samples = [self.transform(self.data[ind]) for ind in inds]
-            samples.append(self.dt)			
+            samples.append(self.dt)
+
+            # Add dynamic covariate samples if available
+            if self.cov_dynamic_data is not None:
+                cov_dynamic_samples = [self.transform(self.cov_dynamic_data[ind]) for ind in inds]
+                samples.extend(cov_dynamic_samples)
+
+            # Add static covariate samples if available
+            if self.is_image:
+                # Build ONE row at the left endpoint (repeat across window)
+                j_trial, t_trunc = self._flat_index_to_trial_t(int(inds[0]))
+                # t_original = t_trunc + lag_k  (because you truncated T→T-k before creating this dataset)
+                t_original = t_trunc + self.lag_k
+                # slice original frames [t-k .. t] → concat on channel
+                Xorig = self.image_lag_source[j_trial]  # (T, C, H, W) original
+                # safety: bounds within trial
+                t0 = t_original - self.lag_k
+                t1 = t_original
+                lag_blocks = [Xorig[t0 + s] for s in range(self.lag_k + 1)]  # [(C,H,W), ...]
+                lag_stack = np.concatenate(lag_blocks, axis=0)               # ((k+1)·C, H, W)
+                lag_row = lag_stack.reshape(-1)                               # ((k+1)·C·H·W,)
+
+                # true static (time-varying) if provided
+                if self.cov_static_list is not None:
+                    static_row = self.cov_static_list[j_trial][t_trunc]       # (S,)
+                    fused = np.concatenate([static_row, lag_row], axis=0)
+                elif self.cov_static_data is not None:
+                    # unlikely for images; kept for completeness
+                    fused = self.cov_static_data[inds[0]]
+                else:
+                    fused = lag_row
+
+                fused_t = self.transform(fused)
+                samples.extend([fused_t for _ in inds])  # repeat across the window
+            else:
+                # vector path (unchanged)
+                if self.cov_static_data is not None:
+                    cov_static_samples = [self.transform(self.cov_static_data[ind]) for ind in inds[:1]]
+                    samples.extend(cov_static_samples * len(inds))
+
             result.append(samples)
 
         if single_index:
             return result[0]
         return result
     
-    def transform(self,data):
+    def transform(self, data):
         return torch.from_numpy(data).type(torch.FloatTensor)
 
 #projection helper 
@@ -706,43 +789,107 @@ def calc_flow_trajectories(model, init_samples, start_tau, end_tau, nt=100):
 class dyn_torch_wrapper(torch.nn.Module):
     """
     Wraps model to torchdyn compatible format.
-    
-    Note that this allows to call dynamics net
-    at different taus.
-    
+    Now handles concatenated input with optional x0_tau and covariates.
+    Supports covariate interpolation during integration.
     """
-
-    def __init__(self, model, tau):
+    def __init__(self, model, tau, x0_tau=None, cov_start=None,
+                 cov_delta=None, include_x0_tau=False,
+                 cov_static=None):
+    
         super().__init__()
         self.model = model
-        self.tau = tau 
-
+        self.tau = tau
+        self.include_x0_tau = include_x0_tau
+        self.x0_tau = x0_tau
+        self.cov_start = cov_start
+        self.cov_delta = cov_delta
+        self.cov_static = cov_static
+        
+        self.is_conv_wrapper = (
+            hasattr(model, 'base_model') or  # ConvVNetWrapper has base_model attribute
+            (hasattr(model, '__class__') and 'ConvVNetWrapper' in model.__class__.__name__) or
+            'ConvVNetWrapper' in str(type(model))
+        )
+        
     def forward(self, t, x, *args, **kwargs):
-        net_taus = torch.ones(x.shape[0]).type(torch.float32).to(x.device)*self.tau
-        out = self.model(x, net_taus)        
+        B = x.shape[0]
+        # time inputs
+        taus  = torch.full((B,), float(self.tau), dtype=torch.float32, device=x.device)
+        t_dyn = (t if torch.is_tensor(t) else torch.tensor(t, device=x.device, dtype=torch.float32))
+        t_dyn = t_dyn.float().view(-1)
+        if t_dyn.numel() != B: 
+            t_dyn = t_dyn[:1].repeat(B)
+
+        # interpolate dynamic covariates at the current ODE time (if provided)
+        if (self.cov_start is not None) and (self.cov_delta is not None):
+            cov_current = self.cov_start + t_dyn.view(B, 1) * self.cov_delta
+        elif self.cov_start is not None:
+            cov_current = self.cov_start
+        else:
+            cov_current = None
+
+        if self.is_conv_wrapper:
+            try:
+                out = self.model(x, cov_current, self.cov_static, taus, t_dyn)
+            except TypeError:
+                out = self.model(x, cov_current, self.cov_static, taus)
+
+        else:
+            # MLP v-net expects three parts: (v_input, taus, t_dyn)
+            parts = [x]
+            # if self.include_x0_tau and (self.x0_tau is not None):
+            #     parts.append(self.x0_tau)
+            if cov_current is not None:
+                parts.append(cov_current)
+            if self.cov_static is not None:
+                parts.append(self.cov_static)
+            x_concat = torch.cat(parts, dim=-1) if len(parts) > 1 else x
+            try:
+                out = self.model(x_concat, taus, t_dyn)
+            except TypeError:
+                out = self.model(x_concat, taus)
         return out
 
-
-def calc_dyn_trajectories(model, init_samples, tau, nt=100):
+def calc_dyn_trajectories(model, init_samples, tau,
+                          x0_tau=None, covariates=None,
+                          next_covariates=None,
+                          include_x0_tau=False, nt=100,
+                          covariates_static=None):
     """
     Computes dynamics net trajectories for a given set of initial
-    samples and tau.
+    samples and tau, now with support for interpolated covariates.
     
-    Args
-    -----
-    model: torch.nn.Module. Instance of a trained dynamics net.
-    init_samples: torch.Tensor. [bs, d]
-    tau: float. Flow time we wish to simulate corresponding dynamics.
     """
-    #setup node 
-    node = NeuralODE(dyn_torch_wrapper(model, tau), solver='dopri5', \
-                     sensitivity="adjoint", atol=1e-4, rtol=1e-4)
-    #get ts 
+    # If x0_tau not provided but needed, assume dynamics starts where flow started
+    if x0_tau is None and include_x0_tau:
+        x0_tau = init_samples.clone()
+    
+    # Compute covariate delta if covariates and next_covariates provided
+    cov_delta = None
+    if covariates is not None and next_covariates is not None:
+        cov_delta = next_covariates - covariates
+    
+    # Setup node with covariate interpolation
+    node = NeuralODE(
+        dyn_torch_wrapper(
+            model, tau, x0_tau,
+            cov_start=covariates, cov_delta=cov_delta,
+            include_x0_tau=include_x0_tau,
+            cov_static=covariates_static
+        ), 
+        solver='dopri5', 
+        sensitivity="adjoint", 
+        atol=1e-4, 
+        rtol=1e-4
+    )
+    
+    # Get ts 
     ts = torch.linspace(0.0, 1.0, nt).to(init_samples.device)
-    #now sim ODE 
+    # Now sim ODE 
     with torch.no_grad():
         traj = node.trajectory(init_samples, ts)
     return traj
+
 
 
 #method to simulate traj encoding 
@@ -786,31 +933,62 @@ def plot_encoded_trajs(gt_traj, encoded_traj, imgshape):
 
 # Methods to sim dynamics trajectories using simple SDEs
 
-def get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt):
+def get_dyn_SDE_dx(dyn_net, curr_x, flow_time, x0_tau=None, covariates_dynamic=None,
+                   next_covariates_dynamic=None, covariates_static=None,
+                   include_x0_tau=True, sigma=0.1, dt=0.001, local_t=None):
     """
-    Computes dx for a single Euler-Marayuma update step.
+    One Euler–Maruyama step.
+    - Dynamic covs: interpolate with local_t∈[0,1] if both ends given; otherwise hold constant.
+    - Static covs: constant within each Δt interval.
+    flow_time = τ (conditioning for the v-net), kept constant.
     """
-    dyn_net_wrapper = dyn_torch_wrapper(dyn_net, flow_time)
-    f = dyn_net_wrapper(flow_time, curr_x) #bs, dim 
-    g = sigma * torch.eye(curr_x.shape[1]).type(torch.float32).to(curr_x.device) #dim, dim
-    dW = torch.randn(curr_x.shape).type(torch.float32).to(curr_x.device)*np.sqrt(dt) #bs, dim 
-    g_dW = torch.einsum('ij, bjk -> bik', g, dW.unsqueeze(-1)).squeeze(-1) #bs, dim
-    dx = f*dt + g_dW
+    cov_delta = None
+    if (covariates_dynamic is not None) and (next_covariates_dynamic is not None):
+        cov_delta = next_covariates_dynamic - covariates_dynamic
+
+    dyn_net_wrapper = dyn_torch_wrapper(
+        dyn_net, flow_time,
+        x0_tau=x0_tau,
+        cov_start=covariates_dynamic, cov_delta=cov_delta,
+        include_x0_tau=include_x0_tau,
+        cov_static=covariates_static,
+    )
+
+    t_eval = 0.0 if local_t is None else float(local_t)
+    f = dyn_net_wrapper(t_eval, curr_x)
+
+    g = sigma * torch.eye(curr_x.shape[1], device=curr_x.device, dtype=torch.float32)
+    dW = torch.randn_like(curr_x, dtype=torch.float32) * np.sqrt(dt)
+    g_dW = torch.einsum('ij, bjk -> bik', g, dW.unsqueeze(-1)).squeeze(-1)
+    dx = f * dt + g_dW
     return dx
 
 
-def int_dyn_SDE(init_x, dyn_net, flow_time, sigma, start_time, end_time, dt):
+def int_dyn_SDE(init_x, dyn_net, flow_time, x0_tau=None,
+                covariates_dynamic=None, next_covariates_dynamic=None,
+                covariates_static=None,
+                include_x0_tau=True, sigma=0.1, start_time=0.0, end_time=1.0, dt=0.001):
     """
-    Simulates SDE from start time to end time, at dt steps
-    Uses dx defined above.
+    Euler–Maruyama simulation on t ∈ [start_time, end_time] with step dt.
+    Dynamic covs are interpolated w.r.t. normalized local time; static covs are held constant.
     """
-    times = torch.arange(start_time, end_time, step=dt)
+    device = init_x.device
+    times = torch.arange(start_time, end_time, step=dt, device=device)
     int_trajs = []
-    curr_x = init_x #bs, dim 
+    curr_x = init_x
     int_trajs.append(init_x.cpu().numpy())
-    for t in range(times.shape[0]):
-        dx = get_dyn_SDE_dx(dyn_net, curr_x, flow_time, sigma, dt)
-        curr_x += dx
+    T = max(float(end_time - start_time), 1e-12)
+    for i in range(times.shape[0]):
+        t_norm = (float(times[i]) - float(start_time)) / T
+        dx = get_dyn_SDE_dx(
+            dyn_net, curr_x, flow_time,
+            x0_tau=x0_tau,
+            covariates_dynamic=covariates_dynamic,
+            next_covariates_dynamic=next_covariates_dynamic,
+            covariates_static=covariates_static,
+            include_x0_tau=include_x0_tau, sigma=sigma, dt=dt, local_t=t_norm,
+        )
+        curr_x = curr_x + dx
         int_trajs.append(curr_x.cpu().numpy())
     return int_trajs
     
@@ -1274,3 +1452,161 @@ def open_url(url: str, cache_dir: str = None, num_attempts: int = 10, verbose: b
     # Return data as file object.
     assert not return_filename
     return io.BytesIO(url_data)
+
+# util_v4.py
+import numpy as np
+
+def split_cov_static_new(cov_static_new_list, img_ch, img_size, lag_k):
+    """
+    cov_static_new_list: list of arrays [T_i, Ss + (k+1)*C*H*W]
+    returns:
+      cov_static_list: list of arrays [T_i, Ss]  (may be Ss=0)
+      lag_flat_list:   list of arrays [T_i, (k+1)*C*H*W]
+    """
+    C, H, W = img_ch, img_size, img_size
+    lag_dim = (lag_k + 1) * C * H * W
+
+    cov_static_list, lag_flat_list = [], []
+    for arr in cov_static_new_list:
+        arr = np.asarray(arr)
+        T, total = arr.shape
+        Ss = total - lag_dim
+        if Ss < 0:
+            raise ValueError(f"split_cov_static_new: got total={total} < lag_dim={lag_dim}")
+        cov_static_list.append(arr[:, :Ss] if Ss > 0 else np.zeros((T, 0), dtype=arr.dtype))
+        lag_flat_list.append(arr[:, Ss:])  # always (T, lag_dim)
+    return cov_static_list, lag_flat_list
+
+# --------------------------------------------------
+# TB plot for general image...
+
+def _get_enc_mod(model):
+    base = model.module if hasattr(model, 'module') else model
+    return getattr(base, 'encoder', base)
+
+def _is_image_like(arr):
+    if arr.ndim == 3 and arr.shape[0] in (1, 3):
+        return True  # (C,H,W)
+    if arr.ndim == 4 and arr.shape[1] in (1, 3):
+        return True  # (T,C,H,W)
+    return False
+
+
+def _make_recon_figure(sample_np, recon_np):
+    if plt is None:
+        return None
+
+    sample_np = np.asarray(sample_np)
+    recon_np = np.asarray(recon_np)
+
+    # Image-like case.
+    if _is_image_like(sample_np):
+        # Normalize to (T,C,H,W)
+        if sample_np.ndim == 3 and sample_np.shape[0] in (1, 3):  # (C,H,W)
+            sample_np = sample_np[None, ...]
+            recon_np = recon_np[None, ...]
+        elif sample_np.ndim == 3 and sample_np.shape[-1] in (1, 3):  # (H,W,C)
+            sample_np = np.moveaxis(sample_np, -1, 0)[None, ...]
+            recon_np = np.moveaxis(recon_np, -1, 0)[None, ...]
+        elif sample_np.ndim == 4 and sample_np.shape[-1] in (1, 3):  # (T,H,W,C)
+            sample_np = np.moveaxis(sample_np, -1, 1)
+            recon_np = np.moveaxis(recon_np, -1, 1)
+
+        # Now sample_np: (T,C,H,W)
+        T = min(8, sample_np.shape[0])
+        fig, axes = plt.subplots(2, T, figsize=(2 * T, 4))
+        if T == 1:
+            axes = np.array(axes).reshape(2, 1)
+
+        for t in range(T):
+            gt = sample_np[t]
+            rc = recon_np[t]
+            gt = np.moveaxis(gt, 0, -1)  # (H,W,C)
+            rc = np.moveaxis(rc, 0, -1)
+
+            axes[0, t].imshow(np.clip(gt, 0.0, 1.0), cmap=None if gt.shape[-1] > 1 else "gray")
+            axes[0, t].axis("off")
+
+            axes[1, t].imshow(np.clip(rc, 0.0, 1.0), cmap=None if rc.shape[-1] > 1 else "gray")
+            axes[1, t].axis("off")
+
+        axes[0, 0].set_ylabel("GT", fontsize=8)
+        axes[1, 0].set_ylabel("REC", fontsize=8)
+        fig.tight_layout()
+        return fig
+
+    # Vector-like case: treat as (T,D) or (D,)
+    if sample_np.ndim == 1:
+        sample_np = sample_np[:, None]
+        recon_np = recon_np[:, None]
+    elif sample_np.ndim > 2:
+        # Flatten trailing dims to D
+        T = sample_np.shape[0]
+        sample_np = sample_np.reshape(T, -1)
+        recon_np = recon_np.reshape(T, -1)
+
+    T = sample_np.shape[0]
+    D = sample_np.shape[1]
+    n_plot = min(2, D)
+
+    fig, axes = plt.subplots(n_plot, 1, figsize=(6, 3 * n_plot))
+    if n_plot == 1:
+        axes = [axes]
+
+    t = np.arange(T)
+    for d in range(n_plot):
+        ax = axes[d]
+        ax.plot(t, sample_np[:, d], label="gt")
+        ax.plot(t, recon_np[:, d], label="rec", linestyle="--")
+        ax.set_xlabel("t")
+        ax.set_ylabel(f"dim {d}")
+        ax.legend(fontsize=8)
+    fig.tight_layout()
+    return fig
+
+
+def log_reconstruction_viz(writer, model, dset_samples, device, gs):
+    if writer is None:
+        return
+    if dset_samples is None or len(dset_samples) == 0:
+        return
+
+    try:
+        sample = dset_samples[0]
+        sample_np = np.asarray(sample)
+
+        # Build input batch for encoder: treat time/frames as batch dimension if present.
+        if sample_np.ndim == 1:
+            x_in = sample_np[None, :]  # (1,D)
+        else:
+            # Use all time steps / frames as separate batch items.
+            T = sample_np.shape[0]
+            x_in = sample_np.reshape(T, -1)
+
+        enc = _get_enc_mod(model)
+        with torch.no_grad():
+            x_t = torch.from_numpy(x_in).to(device=device, dtype=torch.float32)
+            out = enc.rsample(x_t)
+            if isinstance(out, (tuple, list)):
+                recon_flat = out[0]
+            else:
+                recon_flat = out
+
+        recon_flat = recon_flat.detach().cpu().numpy()
+        recon_np = recon_flat.reshape(sample_np.shape)
+
+        fig = _make_recon_figure(sample_np, recon_np)
+        if fig is not None:
+            writer.add_figure("recon/example", fig, gs)
+            writer.flush()
+            plt.close(fig)
+    except Exception as e:  # pragma: no cover
+        # Never break training because of visualization.
+        dist.print0(f"[viz] Skipped reconstruction viz due to error: {repr(e)}")
+
+
+
+
+
+
+

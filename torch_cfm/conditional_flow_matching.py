@@ -265,6 +265,22 @@ class ExactOptimalTransportConditionalFlowMatcher(ConditionalFlowMatcher):
         #get xt, ut for this time pt 
         x0_0, x0_1 = self.ot_sampler.sample_plan(x0_0, x0_1)
         return super().sample_location_and_conditional_flow(x0_0, x0_1, t=t, return_noise=return_noise)
+
+
+@persistence.persistent_class
+class GeneralOptimalTransportConditionalFlowMatcher(ConditionalFlowMatcher):
+    def __init__(self, sigma: Union[float, int] = 0.0, OTmethod = "exact"):
+        super().__init__(sigma)
+        self.ot_sampler = OTPlanSampler(method=OTmethod)
+
+    def sample_location_and_conditional_flow(self, x0_0, x0_1, t=None, return_noise=False):
+        #run OT coupling on single time pt
+        #get xt, ut for this time pt 
+        x0_0, x0_1 = self.ot_sampler.sample_plan(x0_0, x0_1)
+        return super().sample_location_and_conditional_flow(x0_0, x0_1, t=t, return_noise=return_noise)
+
+
+
     
 #for now, am NOT dealing with labels! 
 

@@ -1,0 +1,121 @@
+#### setup environment
+
+
+conda env create -f environment.yml
+
+
+##### change directoy
+
+
+cd isilon/AllStaff/DCF
+
+####### run ball example...
+
+conda activate vfm
+export CUDA_VISIBLE_DEVICES=1
+export WORLD_SIZE=1 RANK=0 LOCAL_RANK=0
+export MASTER_ADDR=127.0.0.1 MASTER_PORT=29700
+export NCCL_ASYNC_ERROR_HANDLING=1
+python vfm_train_v7.py \
+  --data_path data/ball \
+  --data_name ball_dim50_lag0_none_1_1_1 \
+  --outdir out/ball/t_detach \
+  --k_max 200 \
+  --k_target 50 \
+  --ndrop_ramp_kimg 1000 \
+  --lag_k 0 \
+  --grad_clip \
+  --grad_clip_val 100 \
+  --dt 0.01 \
+  --tick_train 50 \
+  --hist_noise_std 1e-2 \
+  --use_t_dyn \
+  --dyn_arch ToyConvUNet \
+  --flow_arch ToyConvUNet \
+  --encoder_arch Latent_LargeCNN_VAE \
+  --conv_ch_cmp 32,64,128,256 \
+  --conv_embed_cmp 256 \
+  --conv_ch_dyn 32,64,128,256 \
+  --conv_embed_dyn 256 \
+  --conv_ch_enc 32,64,128,256 \
+  --d_min 1e-10 \
+  --duration 5000 \
+  --batch 256 \
+  --batch_gpu 16 \
+  --lr 1e-2 \
+  --lr_floor 1e-2 \
+  --lr_decay_kimg 1000 \
+  --d_penalty_type none \
+  --sigma_dyn_fm 1e-2 \
+  --sigma_comp_fm 1e-4 \
+  --alpha 1.0 \
+  --beta 1.0 \
+  --eta 1.0 \
+  --gamma 0.0 \
+  --seed 1 \
+  --tick_print 10 \
+  --snap 5 \
+  --dump 5 \
+  --flow_detach \
+
+
+
+
+####### run maze example...
+
+conda activate vfm
+export CUDA_VISIBLE_DEVICES=1
+export WORLD_SIZE=1 RANK=0 LOCAL_RANK=0
+export MASTER_ADDR=127.0.0.1 MASTER_PORT=29702
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+python vfm_train_v7.py \
+  --data_path data/mc_maze3 \
+  --data_name maze_dimk_lag10_none \
+  --outdir out/maze/dimk_lag10/t/none \
+  --k_max 137 \
+  --k_target 50 \
+  --ndrop_ramp_kimg 1000 \
+  --lag_k 10 \
+  --grad_clip \
+  --grad_clip_val 10 \
+  --dt 0.001 \
+  --tick_train 50 \
+  --hist_noise_std 1e-1 \
+  --use_t_dyn \
+  --dyn_arch ToyMLP \
+  --flow_arch ToyMLP \
+  --encoder_arch Latent_MLP_VAE \
+  --encoder_depth 4 \
+  --encoder_width 256 \
+  --mlp_depth_cmp 4 \
+  --mlp_width_cmp 256 \
+  --mlp_depth_dyn 4 \
+  --mlp_width_dyn 512 \
+  --d_min 1e-10 \
+  --duration 5000 \
+  --batch 256 \
+  --batch_gpu 16 \
+  --lr 1e-3 \
+  --lr_floor 2e-4 \
+  --lr_decay_kimg 3000 \
+  --d_penalty_type none \
+  --sigma_dyn_fm 1e-1 \
+  --sigma_comp_fm 1e-6 \
+  --alpha 1.0 \
+  --beta 1.0 \
+  --eta 1.0 \
+  --eta_decay_start_kimg 3000 \
+  --eta_decay_halflife_kimg 1000 \
+  --eta_floor 0.0 \
+  --gamma 0.0 \
+  --seed 0 \
+  --tick_print 10 \
+  --snap 10 \
+  --dump 10 \
+  --flow_detach \
+
+
+#### the maze example is a bit strange: the latent structure will drift off sometimes after a **super** long run (should due to the numerical error). To prevent this, decay the eta (weight for encoder loss) to 0 after a sufficient long run.
+
+
