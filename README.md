@@ -7,9 +7,6 @@ DCF learns two coupled vector fields:
 1. A **compressive/generative flow** that maps between data space and a compressed latent representation.
 2. A **dynamical flow** that models time evolution at each compression level.
 
-The model uses an encoder-based coupling to define source and target pairs for flow matching. Low-dimensional latent support is encouraged using nested dropout, which orders latent dimensions by construction and supports controllable dimensionality reduction.
-
-The current codebase still uses some older `VFM` naming conventions, but the implementation corresponds to the DCF training pipeline used in the paper.
 
 ## Repository structure
 
@@ -41,8 +38,6 @@ Create and activate the conda environment:
 conda env create -f environment.yml -n vfm
 conda activate vfm
 ```
-
-The code was developed for Python 3.8 and PyTorch 2.1.2. A CUDA-capable NVIDIA GPU is recommended.
 
 ## Data format
 
@@ -86,13 +81,11 @@ Use the corresponding flags when covariates are available:
 --use_static_covariates
 ```
 
-Lag-history covariates are controlled by:
+Lag-history of dynamical flow are controlled by:
 
 ```bash
 --lag_k <K>
 ```
-
-For vector-valued data, lagged observations are concatenated as history covariates. For image-like data, lagged image histories are handled internally.
 
 ## Quick start
 
@@ -104,7 +97,7 @@ python vfm_train_v7.py \
   --data_name <dataset_name> \
   --outdir out/<experiment_name> \
   --k_max <max_latent_budget> \
-  --k_target <effective_latent_dim> \
+  --k_target <effective_latent_dim, i.e., K ~ Geom(1/k_target)> \
   --lag_k <history_length> \
   --dt <time_step> \
   --duration <training_duration> \
@@ -189,50 +182,6 @@ weights the encoder alignment loss.
 --gamma
 ```
 
-weights the optional Lie consistency loss.
-
-### Flow matching type
-
-```bash
---flow_matcher_type regular
---flow_matcher_type exactot
---flow_matcher_type sinkhorn
-```
-
-### Dynamics time input
-
-```bash
---use_t_dyn
-```
-
-adds normalized dynamics time to the dynamical flow input.
-
-### Stabilizing long runs
-
-For long runs where the latent space may drift, the encoder alignment weight can be decayed:
-
-```bash
---eta_decay_start_kimg 3000
---eta_decay_halflife_kimg 1000
---eta_floor 0.0
-```
-
-## Experiments
-
-The manuscript evaluates DCF on:
-
-1. **Rotating-ball simulation**  
-   Short grayscale videos of a moving ball. This tests whether DCF can recover simple low-dimensional dynamics from high-dimensional image data.
-
-2. **Neural population activity**  
-   Center-out reaching data from non-human primates. DCF is evaluated through latent geometry, reconstruction quality, and downstream decoding of cursor velocity.
-
-3. **Mouse behavioral video**  
-   Long behavioral video from Musall et al. DCF identifies structured low-dimensional behavioral states and transient outliers.
-
-4. **Birdsong audio**  
-   Sequential spectrograms from birdsong motifs. DCF learns smooth latent trajectories and rollouts that preserve syllable-level structure.
-
 ## Outputs
 
 Training outputs are written to:
@@ -249,9 +198,6 @@ The script also saves processed data under:
 
 Typical outputs include processed trajectories, covariates, lag-history arrays, network snapshots, training state dumps, and logs.
 
-## Notes
-
-This is research code and is actively evolving. Some function names, filenames, and command-line flags still reflect earlier Velocity Flow Matching naming. For DCF experiments, use `vfm_train_v7.py` as the main entry point.
 
 ## Citation
 
