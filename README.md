@@ -12,23 +12,21 @@ DCF learns two coupled vector fields:
 
 ```text
 .
-├── vfm_train_v7.py              # Main training entry point
-├── run_example.txt              # Example commands for ball and maze experiments
-├── environment.yml              # Conda environment
-├── training/
-│   ├── loss_v7.py               # DCF training losses
-│   ├── networks_v7.py           # Encoder, compression flow, and dynamics networks
-│   └── toy_training_loop_vfm_v7.py
-├── torch_cfm/                   # Flow matching utilities
-├── analysis/                    # Analysis notebooks and plotting code
-├── plot_sim_results_v7.py
-├── plot_sim_results_img_v7.py
-├── plot_neural.py
-├── plot_neural_v7.py
-├── plot_musal_v5.py
-├── dnnlib/
-└── torch_utils/
+├── dnnlib/                 # General utilities for data handling, model helpers, VAE helpers, and reusable infrastructure
+├── notebook_analysis/      # Jupyter notebooks and analysis scripts used to reproduce paper figures and experiment analyses
+├── plotting/               # Standalone plotting scripts
+├── torch_cfm/              # Conditional flow matching and mini-batch OT utilities adapted from TorchCFM, see third-party references below
+├── torch_utils/            # PyTorch utilities for distributed training, checkpointing, logging, and persistence
+├── training/               # Core DCF training code, including losses, network architectures, and training loops
+│
+├── vfm_train_v7.py         # Main command-line training entry point for DCF experiments
+├── run_example.txt         # Example commands for running representative experiments
+├── environment.yml         # Conda environment specification
+├── README.md               
+└── .gitignore
 ```
+
+The main training entry point is `vfm_train_v7.py`. Core model code lives in `training/`, paper analysis notebooks live in `notebook_analysis/`, and reusable plotting scripts live in `plotting/`.
 
 ## Installation
 
@@ -81,7 +79,7 @@ Use the corresponding flags when covariates are available:
 --use_static_covariates
 ```
 
-Lag-history of dynamical flow are controlled by:
+Lag-history inputs for the dynamical flow are controlled by:
 
 ```bash
 --lag_k <K>
@@ -178,9 +176,6 @@ weights the dynamical flow-matching loss.
 
 weights the encoder alignment loss.
 
-```bash
---gamma
-```
 
 ## Outputs
 
@@ -197,6 +192,29 @@ The script also saves processed data under:
 ```
 
 Typical outputs include processed trajectories, covariates, lag-history arrays, network snapshots, training state dumps, and logs.
+
+
+## Third-party code and method references
+
+Parts of this repository build on or adapt utilities from TorchCFM, including conditional flow matching and mini-batch optimal transport components. If you use the `torch_cfm/` components or the OT-CFM option, please also cite the original Conditional Flow Matching / OT-CFM work.
+
+```bibtex
+@article{tong2024improving,
+  title = {Improving and Generalizing Flow-Based Generative Models with Minibatch Optimal Transport},
+  author = {Tong, Alexander and Fatras, Kilian and Malkin, Nikolay and Huguet, Guillaume and Zhang, Yanlei and Rector-Brooks, Jarrid and Wolf, Guy and Bengio, Yoshua},
+  journal = {Transactions on Machine Learning Research},
+  year = {2024}
+}
+```
+
+```bibtex
+@software{torchcfm,
+  title = {TorchCFM: Conditional Flow Matching},
+  author = {Tong, Alexander and contributors},
+  year = {2023},
+  url = {https://github.com/atong01/conditional-flow-matching}
+}
+```
 
 
 ## Citation
